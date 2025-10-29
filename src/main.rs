@@ -92,15 +92,15 @@ fn decide_and_nn_interp(buf: &mut [u32], x: usize) {
             let bg_col = byt1 & 0x3F;
             let bg_idx = (byt0 >> 6) | ((byt1 >> 4) & 0xC);
             let sp_col = byt2 & 0x3F;
-            let sp_idx = byt3 >> 2;
-            let sp_att = byt3 & 0x3;
+            let sp_idx = byt3 >> 1;
+            let sp_att = byt3 & 0x1;
 
-            let col = match (bg_idx, sp_idx & 0xF, sp_att) {
+            let col = match (bg_idx & 0x3, sp_idx & 0x3, sp_att) {
                 (0, 0, _) => ext_col,
                 (0, _s, _) => sp_col,
                 (_b, 0, _) => bg_col,
-                (_b, _s, 0 | 1 | 3) => sp_col,
-                (_b, _s, 2) => bg_col,
+                (_b, _s, 0) => sp_col,
+                (_b, _s, 1) => bg_col,
                 _ => unreachable!(),
             } as usize;
 
@@ -211,6 +211,7 @@ impl NesData {
         if (chr_size == 0 && chr.len() != 0) || chr_size == 1 {
             self.ppu.borrow_mut().load_chr(0..0x2000, &chr[0..0x2000]);
         } else if chr_size == 0 {
+            unimplemented!();
         } else {
             unimplemented!();
         }
@@ -361,9 +362,9 @@ impl ApplicationHandler for Nes {
                         winit::keyboard::KeyCode::Digit0 => {
                             controllers.1.buttons.start = state.is_pressed()
                         }
-                        _ => error!("Unhandled key"),
+                        _ => warn!("Unhandled key"),
                     },
-                    _ => error!("Unknown keycode"),
+                    _ => warn!("Unknown keycode"),
                 }
             }
             WindowEvent::RedrawRequested => {

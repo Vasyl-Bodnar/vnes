@@ -360,17 +360,17 @@ impl State {
                     ppu.t |= (self.at_nc(0x2005) >> 3) as u16;
                     ppu.x = self.at_nc(0x2005) & 0x7;
                 } else {
+                    let val = self.at_nc(0x2005) % 240;
                     ppu.t &= 0x8C1F;
-                    ppu.t |= ((self.at_nc(0x2005) >> 3) as u16) << 5;
-                    ppu.t |= ((self.at_nc(0x2005) & 0x7) as u16) << 12;
+                    ppu.t |= ((val >> 3) as u16) << 5;
+                    ppu.t |= ((val & 0x7) as u16) << 12;
                 }
                 ppu.w ^= 1;
             }
             6 => {
                 if ppu.w == 0 {
-                    ppu.t &= 0x00FF;
-                    ppu.t |= (self.at_nc(0x2006) as u16) << 8;
-                    ppu.t &= 0x3FFF;
+                    ppu.t &= 0x80FF;
+                    ppu.t |= ((self.at_nc(0x2006) & 0x3F) as u16) << 8;
                     trace!("SET HI! from {:x} to {:x}", self.at_nc(0x2006), ppu.t);
                 } else {
                     ppu.t &= 0xFF00;

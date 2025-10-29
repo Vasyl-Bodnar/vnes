@@ -35,6 +35,8 @@ struct OamState {
     n: u8,
     snd_n: u8,
     m: u8,
+    read_n: u8,
+    read_sp: [u8; 4],
     task: u8,
 }
 
@@ -163,101 +165,153 @@ impl State {
             _ => {}
         }
 
-        // TODO: Rework to be more accurate
-        if self.scanline == 0 {
-            if !(240..=261).contains(&self.scanline)
-                && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
-            {
-                match self.cycles {
-                    1..64 => {
-                        self.oam_snd[(self.cycles / 2) as usize] = 0xFF;
-                    }
+        if !(241..=261).contains(&self.scanline)
+            && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
+        {
+            match self.cycles {
+                1..64 => {
+                    self.oam_snd[(self.cycles / 2) as usize] = 0xFF;
+                }
 
-                    64 => {
-                        self.oam_snd[0] = 0xFF;
+                64 => {
+                    self.oam_snd[0] = 0xFF;
 
-                        self.oam_st.task = 0;
-                        self.oam_st.n = 0;
-                        self.oam_st.snd_n = 0;
-                        self.oam_st.m = 0;
-                    }
+                    self.oam_st.task = 1;
+                    self.oam_st.n = 0;
+                    self.oam_st.snd_n = 0;
+                    self.oam_st.read_n = 0;
+                    self.oam_st.m = 0;
+                }
 
-                    65..257 => match self.oam_st.task {
-                        0 => {
-                            if self.cycles % 2 == 0 {
-                                if self.oam_st.snd_n < 8 {
-                                    self.oam_snd
-                                        [(4 * self.oam_st.snd_n + self.oam_st.m) as usize] =
-                                        self.oam_st.buf;
-                                    self.oam_st.m += 1;
-                                }
-                            } else {
-                                self.oam_st.buf =
-                                    self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
-                                if (0..241).contains(&self.oam_st.buf) {
-                                    self.oam_st.task = 1;
-                                }
+                65..257 => match self.oam_st.task {
+                    0 => {}
+                    1 => {
+                        if self.cycles % 2 == 0 {
+                            if self.oam_st.snd_n < 8 {
+                                self.oam_snd[(4 * self.oam_st.snd_n + self.oam_st.m) as usize] =
+                                    self.oam_st.buf;
                             }
-                        }
-                        1 => {
-                            if self.cycles % 2 == 0 {
-                                if self.oam_st.snd_n < 8 {
-                                    self.oam_snd
-                                        [(4 * self.oam_st.snd_n + self.oam_st.m) as usize] =
-                                        self.oam_st.buf;
-                                    self.oam_st.m += 1;
+                        } else {
+                            self.oam_st.buf =
+                                self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
 
-                                    if self.oam_st.m >= 4 {
-                                        self.oam_st.m = 0;
-                                        self.oam_st.task = 2;
-                                    }
-                                }
-                            } else {
-                                self.oam_st.buf =
-                                    self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
-
-                                // Use unimplemented bit to recognize this as "snd_oam" sprite
-                                if self.oam_st.m == 2 {
-                                    self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize] |= 0x10;
-                                }
-                            }
-                        }
-                        2 => {
-                            self.oam_st.n += 1;
-                            if self.oam_st.n >= 64 {
-                                self.oam_st.task = 4;
-                            } else if self.oam_st.snd_n < 8 {
-                                self.oam_st.task = 0;
+                            let y = self.oam_st.buf;
+                            if (y..y + 8).contains(&((self.scanline + 1) as u8))
+                                || (cpu.get_ctrl().s_size
+                                    && (y..y + 16).contains(&((self.scanline + 1) as u8)))
+                            {
+                                self.oam_st.task = 2;
                             } else {
                                 self.oam_st.task = 3;
                             }
                         }
-                        3 => {
-                            if (0..241)
-                                .contains(&self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize])
-                            {
-                                let mut stt = cpu.get_stt();
-                                stt.sprite_overflow = true;
-                                cpu.put_stt(stt);
-                                // NOTE: Technically, this is a state where we need to read more entries, but
-                                // this does not concern us at this point
-                                self.oam_st.task = 4;
-                            } else {
-                                self.oam_st.n += 1;
-                                // NOTE: This one is a NES bug
+                    }
+                    2 => {
+                        if self.cycles % 2 == 0 {
+                            if self.oam_st.snd_n < 8 {
+                                self.oam_snd[(4 * self.oam_st.snd_n + self.oam_st.m) as usize] =
+                                    self.oam_st.buf;
                                 self.oam_st.m += 1;
 
-                                if self.oam_st.n >= 64 {
-                                    self.oam_st.task = 4
+                                if self.oam_st.m >= 4 {
+                                    self.oam_st.snd_n += 1;
+                                    self.oam_st.m = 0;
+                                    self.oam_st.task = 3;
                                 }
                             }
+                        } else {
+                            self.oam_st.buf =
+                                self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
                         }
-                        4 => {}
-                        _ => unreachable!(),
-                    },
-                    // NOTE: Fetches and prefetches occur after
-                    _ => {}
-                }
+                    }
+                    3 => {
+                        self.oam_st.n += 1;
+                        if self.oam_st.n >= 64 {
+                            self.oam_st.task = 0;
+                        } else if self.oam_st.snd_n < 8 {
+                            self.oam_st.task = 1;
+                        } else if self.oam_st.snd_n == 8 {
+                            self.oam_st.task = 4;
+                        }
+                    }
+                    4 => {
+                        let y = self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
+                        if (y..y + 8).contains(&((self.scanline + 1) as u8))
+                            || (cpu.get_ctrl().s_size
+                                && (y..y + 16).contains(&((self.scanline + 1) as u8)))
+                        {
+                            let mut stt = cpu.get_stt();
+                            stt.sprite_overflow = true;
+                            cpu.put_stt(stt);
+
+                            self.oam_st.task = 5;
+                        } else {
+                            self.oam_st.n += 1;
+                            // NOTE: This one is a NES bug
+                            self.oam_st.m += 1;
+
+                            if self.oam_st.n >= 64 {
+                                self.oam_st.task = 0
+                            }
+                        }
+                    }
+                    5 => {
+                        self.oam_st.m += 1;
+                        if self.oam_st.m >= 4 {
+                            self.oam_st.n += 1;
+                            self.oam_st.m = 0;
+                        }
+                        self.oam_st.task = 0
+                    }
+                    _ => unreachable!(),
+                },
+                257..321 => match self.oam_st.task {
+                    0..4 if self.oam_st.read_n < self.oam_st.snd_n => {
+                        self.oam_st.read_sp[self.oam_st.task as usize] =
+                            self.oam_snd[(4 * self.oam_st.read_n + self.oam_st.task) as usize];
+                        self.oam_st.task += 1;
+                    }
+                    4..8 => {
+                        // Read X, do nothing with it
+                        // Really just draw
+                        if self.oam_st.task == 4 {
+                            let [y, mut tile, att, x] = self.oam_st.read_sp;
+
+                            let bank = if (cpu.get_ctrl().s_size && tile & 1 != 0)
+                                || cpu.get_ctrl().sp_addr
+                            {
+                                0x1000
+                            } else {
+                                0x0
+                            };
+
+                            tile += if cpu.get_ctrl().s_size && y % 16 > 8 {
+                                1
+                            } else {
+                                0
+                            };
+
+                            let chr_addr = bank | ((tile as u16) << 4);
+
+                            self.draw_tile_scanline(
+                                cpu,
+                                fb_buf.0,
+                                chr_addr,
+                                att,
+                                x as u16,
+                                y as u16,
+                                ((self.scanline + 1) as u8 - y) % 8,
+                            );
+                        }
+
+                        self.oam_st.task += 1;
+                    }
+                    _ => {
+                        self.oam_st.task = 0;
+                        self.oam_st.read_n += 1;
+                    }
+                },
+                _ => {}
             }
         }
 
@@ -267,7 +321,7 @@ impl State {
 
         // NOTE: While good correctness is currently the goal, there are lot of parts that get
         // recomputed far more than they need to.
-        if self.cycles < 256
+        if self.cycles <= 256
             && !(240..=261).contains(&self.scanline)
             && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
         {
@@ -305,114 +359,55 @@ impl State {
                 self.palette[0] | ((bg_val & 0x3) << 6);
             fb_buf.0[(pixel_y * 256 + pixel_x) as usize].1 =
                 self.palette[bg_val as usize] | ((bg_val & 0xC) << 4);
-
-            // For now, we will do sprite updates in some specific time
-            // instead of proper NES-accurate method
-            if pixel_x == 240 && (1..65).contains(&pixel_y) {
-                let sp = (63 - (pixel_y % 64)) * 4;
-                let sp_y = self.oam[sp as usize] as u16;
-                if (0..240).contains(&sp_y) {
-                    let sp_tile = self.oam[(sp + 1) as usize] as u16;
-                    let sp_att = self.oam[(sp + 2) as usize];
-                    let sp_x = self.oam[(sp + 3) as usize] as u16;
-
-                    if cpu.get_ctrl().s_size {
-                        let sp_bank = if sp_tile & 1 != 0 { 0x1000 } else { 0x0 };
-
-                        self.draw_tile(
-                            cpu,
-                            fb_buf.0,
-                            sp,
-                            sp_bank | (sp_tile << 4),
-                            sp_att,
-                            sp_x,
-                            sp_y + if sp_att & 0x80 != 0 { 8 } else { 0 },
-                        );
-                        self.draw_tile(
-                            cpu,
-                            fb_buf.0,
-                            sp,
-                            sp_bank | ((sp_tile + 1) << 4),
-                            sp_att,
-                            sp_x,
-                            sp_y + if sp_att & 0x80 == 0 { 8 } else { 0 },
-                        );
-                    } else {
-                        let sp_bank = if cpu.get_ctrl().sp_addr { 0x1000 } else { 0x0 };
-
-                        let sp_chr_addr = sp_bank | (sp_tile << 4);
-
-                        self.draw_tile(cpu, fb_buf.0, sp, sp_chr_addr, sp_att, sp_x, sp_y);
-                    }
-                }
-            }
         }
+
+        /* TODO: Implement this proper
+        if sp == 0 && !cpu.get_stt().sprite0_hit && buf[(y * 256 + x) as usize].0 > 0 {
+            let mut stt = cpu.get_stt();
+            stt.sprite0_hit = true;
+            cpu.put_stt(stt);
+        }
+        */
 
         self.cycles = self.cycles.wrapping_add(1);
     }
 
-    fn draw_tile(
+    fn draw_tile_scanline(
         &mut self,
         cpu: &mut cpu::State,
         buf: &mut [(u8, u8, u8, u8)],
-        sp: u16,
-        sp_chr_addr: u16,
-        sp_att: u8,
-        sp_x: u16,
-        sp_y: u16,
+        chr_addr: u16,
+        att: u8,
+        x: u16,
+        y: u16,
+        i: u8,
     ) {
-        for i in 0..8 {
-            for j in (0..8).rev() {
-                let sp_up = (self.chr[(sp_chr_addr | 0x8 | i) as usize] >> j) & 1;
-                let sp_low = (self.chr[(sp_chr_addr | i) as usize] >> j) & 1;
+        for j in (0..8).rev() {
+            let up = (self.chr[(chr_addr | 0x8 | i as u16) as usize] >> j) & 1;
+            let low = (self.chr[(chr_addr | i as u16) as usize] >> j) & 1;
 
-                let sp_val = 0x10 | ((sp_att & 0x3) << 2) | (sp_up << 1) | sp_low;
+            let val = 0x10 | ((att & 0x3) << 2) | (up << 1) | low;
 
-                if sp_val & 0x3 != 0
-                    && cpu.get_mask().spr_rend
-                    && (sp_x >= 8 || cpu.get_mask().spr_left)
-                {
-                    let att_p_val = (sp_val << 2) | ((sp_att >> 4) & 0x3);
+            if cpu.get_mask().spr_rend && (x >= 8 || cpu.get_mask().spr_left) {
+                let att_p_val = (val << 1) | ((att >> 5) & 0x1);
 
-                    let (x, y) = match (sp_att & 0x40 != 0, sp_att & 0x80 != 0) {
-                        (false, true) => ((sp_x + 7 - j) % 256, (sp_y + 7 - i) % 241),
-                        (false, false) => ((sp_x + 7 - j) % 256, (sp_y + i) % 241),
-                        (true, true) => ((sp_x + j) % 256, (sp_y + 7 - i) % 241),
-                        (true, false) => ((sp_x + j) % 256, (sp_y + i) % 241),
-                    };
-
-                    if buf[(y * 256 + x) as usize].2 != 0 {
-                        match buf[(y * 256 + x) as usize].3 & 0x3 {
-                            0b00 => {
-                                buf[(y * 256 + x) as usize].2 = self.palette[sp_val as usize];
-                                buf[(y * 256 + x) as usize].3 = att_p_val;
-                            }
-                            0b01 => {
-                                if att_p_val & 1 != 0 {
-                                    buf[(y * 256 + x) as usize].2 = self.palette[sp_val as usize];
-                                    buf[(y * 256 + x) as usize].3 = att_p_val;
-                                }
-                            }
-                            0b10 | 0b11 => {
-                                if att_p_val & 1 != 0 {
-                                    buf[(y * 256 + x) as usize].2 = self.palette[sp_val as usize];
-                                    buf[(y * 256 + x) as usize].3 = att_p_val;
-                                } else if att_p_val & 2 != 0 {
-                                    buf[(y * 256 + x) as usize].2 = self.palette[sp_val as usize];
-                                    buf[(y * 256 + x) as usize].3 = att_p_val;
-                                }
-                            }
-                            _ => unreachable!(),
+                let (x, y) = match (att & 0x40 != 0, att & 0x80 != 0) {
+                    (false, true) => (x + 7 - j, y + 7 - i as u16),
+                    (false, false) => (x + 7 - j, y + i as u16),
+                    (true, true) => (x + j, y + 7 - i as u16),
+                    (true, false) => (x + j, y + i as u16),
+                };
+                if buf[(y * 256 + x) as usize].2 != 0 {
+                    match (buf[(y * 256 + x) as usize].3 >> 1) & 0x3 {
+                        0 => {
+                            buf[(y * 256 + x) as usize].2 = self.palette[val as usize];
+                            buf[(y * 256 + x) as usize].3 = att_p_val;
                         }
-                    } else {
-                        buf[(y * 256 + x) as usize].2 = self.palette[sp_val as usize];
-                        buf[(y * 256 + x) as usize].3 = att_p_val;
+                        _ => {}
                     }
-                    if sp == 0 && !cpu.get_stt().sprite0_hit && buf[(y * 256 + x) as usize].0 > 0 {
-                        let mut stt = cpu.get_stt();
-                        stt.sprite0_hit = true;
-                        cpu.put_stt(stt);
-                    }
+                } else {
+                    buf[(y * 256 + x) as usize].2 = self.palette[val as usize];
+                    buf[(y * 256 + x) as usize].3 = att_p_val;
                 }
             }
         }
