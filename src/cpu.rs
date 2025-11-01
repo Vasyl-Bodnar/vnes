@@ -344,8 +344,8 @@ impl State {
         match ppu_n {
             0 => {
                 ppu.t &= 0xF3FF;
-                ppu.t |= if self.get_ctrl().nt1 { 1024 } else { 0 };
-                ppu.t |= if self.get_ctrl().nt2 { 2048 } else { 0 };
+                ppu.t |= if self.get_ctrl().nt1 { 0x400 } else { 0 };
+                ppu.t |= if self.get_ctrl().nt2 { 0x800 } else { 0 };
             }
             3 => {
                 ppu.oam_addr = self.at_nc(0x2003);
@@ -356,12 +356,13 @@ impl State {
             }
             5 => {
                 if ppu.w == 0 {
-                    ppu.t &= 0xFFE0;
-                    ppu.t |= (self.at_nc(0x2005) >> 3) as u16;
-                    ppu.x = self.at_nc(0x2005) & 0x7;
+                    let val = self.at_nc(0x2005);
+                    ppu.t &= 0x7FE0;
+                    ppu.t |= (val >> 3) as u16;
+                    ppu.x = val & 0x7;
                 } else {
-                    let val = self.at_nc(0x2005) % 240;
-                    ppu.t &= 0x8C1F;
+                    let val = self.at_nc(0x2005);
+                    ppu.t &= 0x0C1F;
                     ppu.t |= ((val >> 3) as u16) << 5;
                     ppu.t |= ((val & 0x7) as u16) << 12;
                 }
@@ -369,7 +370,7 @@ impl State {
             }
             6 => {
                 if ppu.w == 0 {
-                    ppu.t &= 0x80FF;
+                    ppu.t &= 0x00FF;
                     ppu.t |= ((self.at_nc(0x2006) & 0x3F) as u16) << 8;
                     trace!("SET HI! from {:x} to {:x}", self.at_nc(0x2006), ppu.t);
                 } else {

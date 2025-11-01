@@ -211,7 +211,7 @@ impl NesData {
         if (chr_size == 0 && chr.len() != 0) || chr_size == 1 {
             self.ppu.borrow_mut().load_chr(0..0x2000, &chr[0..0x2000]);
         } else if chr_size == 0 {
-            unimplemented!();
+            // Continue
         } else {
             unimplemented!();
         }
@@ -225,7 +225,43 @@ impl NesData {
         self.cpu.reset = true;
     }
 
-    pub fn step(&mut self, buf: &mut [u32]) {
+    pub fn stepl(&mut self, buf: &mut [u32]) {
+        self.cpu.cycle().unwrap();
+        {
+            let ppu = &mut self.ppu.borrow_mut();
+            ppu.cycle(&mut self.cpu, buf);
+            ppu.cycle(&mut self.cpu, buf);
+            ppu.cycle(&mut self.cpu, buf);
+        }
+    }
+
+    pub fn stepm0(&mut self, buf: &mut [u32]) {
+        {
+            let ppu = &mut self.ppu.borrow_mut();
+            ppu.cycle(&mut self.cpu, buf);
+        }
+        self.cpu.cycle().unwrap();
+        {
+            let ppu = &mut self.ppu.borrow_mut();
+            ppu.cycle(&mut self.cpu, buf);
+            ppu.cycle(&mut self.cpu, buf);
+        }
+    }
+
+    pub fn stepm1(&mut self, buf: &mut [u32]) {
+        {
+            let ppu = &mut self.ppu.borrow_mut();
+            ppu.cycle(&mut self.cpu, buf);
+            ppu.cycle(&mut self.cpu, buf);
+        }
+        self.cpu.cycle().unwrap();
+        {
+            let ppu = &mut self.ppu.borrow_mut();
+            ppu.cycle(&mut self.cpu, buf);
+        }
+    }
+
+    pub fn stepr(&mut self, buf: &mut [u32]) {
         {
             let ppu = &mut self.ppu.borrow_mut();
             ppu.cycle(&mut self.cpu, buf);
@@ -235,9 +271,16 @@ impl NesData {
         self.cpu.cycle().unwrap();
     }
 
+    // NOTE: This is more so fun than being "accurate"
     fn frame(&mut self, buf: &mut [u32]) {
-        for _ in 0..CYCLES_PER_FRAME {
-            self.step(buf);
+        for i in 0..CYCLES_PER_FRAME {
+            match i & 3 {
+                0 => self.stepl(buf),
+                1 => self.stepm0(buf),
+                2 => self.stepm1(buf),
+                3 => self.stepr(buf),
+                _ => unreachable!(),
+            }
         }
     }
 
