@@ -109,7 +109,7 @@ impl State {
                 }
             }
             // Increment scroll y
-            256 if !(241..261).contains(&self.scanline)
+            256 if !(240..261).contains(&self.scanline)
                 && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend) =>
             {
                 if (self.v & 0x7000) != 0x7000 {
@@ -149,7 +149,7 @@ impl State {
             // NOTE: 328 and 336 also theoretically should have increments
             // However those are the tiles of the next scanline
             // We don't prefetch, so we don't preincrement
-            8..=256
+            8..256
                 if self.cycles % 8 == 0
                     && !(240..261).contains(&self.scanline)
                     && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend) =>
@@ -165,13 +165,13 @@ impl State {
         }
 
         match self.cycles {
-            257..=320 if self.scanline == 261 || (0..240).contains(&self.scanline) => {
+            257..=320 if !(240..261).contains(&self.scanline) => {
                 self.oam_addr = 0;
             }
             _ => {}
         }
 
-        if !(240..=261).contains(&self.scanline)
+        if !(240..261).contains(&self.scanline)
             && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
         {
             self.eval_draw_sprites(cpu, fb_buf.0);
@@ -182,7 +182,7 @@ impl State {
 
         // NOTE: While good correctness is currently the goal, there are lot of parts that get
         // recomputed far more than they need to.
-        if self.cycles <= 256
+        if self.cycles < 256
             && !(240..=261).contains(&self.scanline)
             && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
         {
@@ -195,7 +195,7 @@ impl State {
 
             let bg_tile = self.mem[tile_addr as usize] as u16;
             let att_table = self.mem[att_table_addr as usize];
-            let att = (att_table >> 2 * (((pixel_y >> 3) & 0x2) | ((pixel_x >> 4) & 0x1))) & 0x3;
+            let att = (att_table >> 2 * (((self.v >> 5) & 0x2) | ((self.v >> 1) & 0x1))) & 0x3;
 
             let bg_chr_addr = bg_bank | (bg_tile << 4) | ((self.v & 0x7000) >> 12);
 
