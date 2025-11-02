@@ -22,6 +22,7 @@ use winit::{
 
 mod controller;
 mod cpu;
+mod mapper;
 mod ppu;
 mod registers;
 
@@ -31,7 +32,7 @@ const SCALE: usize = 3;
 
 const DELTA: f32 = 1. / 60.;
 // Currently a magicish number that produces the best result
-const CYCLES_PER_FRAME: usize = 29785;
+const CYCLES_PER_FRAME: usize = 89342;
 
 pub static SYS_PALLETE: [u32; 64] = [
     0x808080, 0x003DA6, 0x0012B0, 0x440096, 0xA1005E, 0xC70028, 0xBA0600, 0x8C1700, 0x5C2F00,
@@ -124,6 +125,7 @@ fn decide_and_nn_interp(buf: &mut [u32], x: usize) {
 
 struct NesData {
     ppu: Rc<RefCell<ppu::State>>,
+    mapper: Rc<RefCell<mapper::State>>,
     controllers: Rc<RefCell<(controller::State, controller::State)>>,
     cpu: cpu::State,
     budget: Duration,
@@ -134,6 +136,7 @@ impl Default for NesData {
     fn default() -> Self {
         NesData {
             ppu: Default::default(),
+            mapper: Default::default(),
             controllers: Default::default(),
             cpu: Default::default(),
             budget: Duration::new(0, 0),
@@ -155,13 +158,12 @@ impl NesData {
 
         if sig[7] == 8 && sig[0x0C] == 8 {
             println!("NES 2.0");
-            return;
         } else if sig[7] == 4 && sig[0x0C] == 4 {
-            warn!("archaic, trying anyway..");
+            println!("WARNING: archaic, trying anyway..");
         } else if sig[7] == 0 && sig[0x0C] == 0 {
             println!("i{}{}{}", sig[0] as char, sig[1] as char, sig[2] as char);
         } else {
-            warn!("archaic, possibly 0.7, trying anyway..");
+            println!("WARNING: archaic, possibly 0.7, trying anyway..");
         }
 
         let prg_size = sig[4] as usize;
@@ -192,94 +194,38 @@ impl NesData {
             error!("This one actually uses trainer");
         }
 
-        let prg = &buf[16..];
-        let chr;
+        let cpu = &mut self.cpu;
+        let ppu = &mut self.ppu.borrow_mut();
 
-        if mapper_num == 0 {
-            if prg_size == 2 {
-                self.cpu.load_ctg(0x8000..0x10000, &prg[..32 * 1024]);
-                chr = &prg[32 * 1024..];
-            } else {
-                self.cpu.load_ctg(0x8000..0xC000, &prg[..16 * 1024]);
-                self.cpu.load_ctg(0xC000..0x10000, &prg[..16 * 1024]);
-                chr = &prg[16 * 1024..];
-            }
-        } else {
-            unimplemented!();
-        }
-
-        if (chr_size == 0 && chr.len() != 0) || chr_size == 1 {
-            self.ppu.borrow_mut().load_chr(0..0x2000, &chr[0..0x2000]);
-        } else if chr_size == 0 {
-            // Continue
-        } else {
-            unimplemented!();
-        }
+        self.mapper = Rc::new(RefCell::new(mapper::State::new(
+            cpu,
+            ppu,
+            mapper_num,
+            prg_size as u8,
+            chr_size as u8,
+            &buf[16..],
+        )));
 
         if nt_arrang {
-            self.ppu.borrow_mut().mirr = ppu::Mirror::Vertical;
+            ppu.mirr = ppu::Mirror::Vertical;
         } else {
-            self.ppu.borrow_mut().mirr = ppu::Mirror::Horizontal;
+            ppu.mirr = ppu::Mirror::Horizontal;
         }
 
-        self.cpu.reset = true;
-    }
+        cpu.reset = true;
 
-    pub fn stepl(&mut self, buf: &mut [u32]) {
-        self.cpu.cycle().unwrap();
-        {
-            let ppu = &mut self.ppu.borrow_mut();
-            ppu.cycle(&mut self.cpu, buf);
-            ppu.cycle(&mut self.cpu, buf);
-            ppu.cycle(&mut self.cpu, buf);
-        }
-    }
-
-    pub fn stepm0(&mut self, buf: &mut [u32]) {
-        {
-            let ppu = &mut self.ppu.borrow_mut();
-            ppu.cycle(&mut self.cpu, buf);
-        }
-        self.cpu.cycle().unwrap();
-        {
-            let ppu = &mut self.ppu.borrow_mut();
-            ppu.cycle(&mut self.cpu, buf);
-            ppu.cycle(&mut self.cpu, buf);
-        }
-    }
-
-    pub fn stepm1(&mut self, buf: &mut [u32]) {
-        {
-            let ppu = &mut self.ppu.borrow_mut();
-            ppu.cycle(&mut self.cpu, buf);
-            ppu.cycle(&mut self.cpu, buf);
-        }
-        self.cpu.cycle().unwrap();
-        {
-            let ppu = &mut self.ppu.borrow_mut();
-            ppu.cycle(&mut self.cpu, buf);
-        }
-    }
-
-    pub fn stepr(&mut self, buf: &mut [u32]) {
-        {
-            let ppu = &mut self.ppu.borrow_mut();
-            ppu.cycle(&mut self.cpu, buf);
-            ppu.cycle(&mut self.cpu, buf);
-            ppu.cycle(&mut self.cpu, buf);
-        }
-        self.cpu.cycle().unwrap();
+        self.cpu.mapper_st = Some(self.mapper.clone());
     }
 
     // NOTE: This is more so fun than being "accurate"
     fn frame(&mut self, buf: &mut [u32]) {
         for i in 0..CYCLES_PER_FRAME {
-            match i & 3 {
-                0 => self.stepl(buf),
-                1 => self.stepm0(buf),
-                2 => self.stepm1(buf),
-                3 => self.stepr(buf),
-                _ => unreachable!(),
+            if i % 3 == 0 {
+                self.cpu.cycle().unwrap();
+            }
+            {
+                let ppu = &mut self.ppu.borrow_mut();
+                ppu.cycle(&mut self.cpu, buf);
             }
         }
     }

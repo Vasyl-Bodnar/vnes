@@ -3,6 +3,7 @@ use std::{cell::RefCell, fmt::Debug, ops::Range, rc::Rc};
 use log::trace;
 
 use crate::controller;
+use crate::mapper;
 use crate::ppu;
 use crate::registers;
 
@@ -171,11 +172,11 @@ pub enum InstrErr {
     ImpossibleCycle(Instr, u8),
     ImpossibleInstr(Instr),
     UnhandledByte(u8),
-    Halt,
+    Halt(u64),
     Bubble,
 }
 
-// So this practically handles step by step of creating an instr
+// So this practically handles step by step creation of an instr
 type Partial = Result<Instr, Box<dyn Fn(u16) -> Instr>>;
 type Unrefined = Result<Partial, u8>;
 
@@ -210,8 +211,9 @@ struct CurrWork {
 
 type PPURef = Rc<RefCell<ppu::State>>;
 type CntrsRef = Rc<RefCell<(controller::State, controller::State)>>;
+type MapperRef = Rc<RefCell<mapper::State>>;
 
-// Fields are needlessly public for now
+// NOTE: Fields are needlessly public for now
 pub struct State {
     a: u8,
     x: u8,
@@ -226,10 +228,11 @@ pub struct State {
     pub reset: bool,
     pub ppu_st: Option<PPURef>,
     pub controllers_st: Option<CntrsRef>,
+    pub mapper_st: Option<MapperRef>,
     pub mem: [u8; 0x2000],
     pub ppu: [u8; 8],
     pub misc: [u8; 32],
-    pub ctg: [u8; 0xBFE0],
+    pub prg: [u8; 0xBFE0],
 }
 
 impl Debug for State {
@@ -270,10 +273,11 @@ impl Default for State {
             reset: true,
             ppu_st: None,
             controllers_st: None,
+            mapper_st: None,
             mem: [0; 0x2000],
             ppu: [0; 8],
             misc: [0; 32],
-            ctg: [0; 0xBFE0],
+            prg: [0; 0xBFE0],
         }
     }
 }
@@ -340,7 +344,11 @@ impl State {
         self.cycles += 1;
     }
 
-    fn proc_ppu_write(&mut self, ppu: &mut ppu::State, ppu_n: u8) {
+    fn proc_ppu_write(&mut self, ppu_n: u8) {
+        let Some(ppu) = self.ppu_st.clone() else {
+            return;
+        };
+        let mut ppu = ppu.borrow_mut();
         match ppu_n {
             0 => {
                 ppu.t &= 0xF3FF;
@@ -390,7 +398,11 @@ impl State {
         }
     }
 
-    fn proc_ppu_read(&mut self, ppu: &mut ppu::State, ppu_n: u8) -> u8 {
+    fn proc_ppu_read(&mut self, ppu_n: u8) -> u8 {
+        let Some(ppu) = self.ppu_st.clone() else {
+            return self.ppu[ppu_n as usize];
+        };
+        let mut ppu = ppu.borrow_mut();
         match ppu_n {
             2 => {
                 ppu.w = 0;
@@ -415,11 +427,11 @@ impl State {
         }
     }
 
-    fn proc_misc_write(
-        &mut self,
-        controllers: &mut (controller::State, controller::State),
-        misc_n: u8,
-    ) {
+    fn proc_misc_write(&mut self, misc_n: u8) {
+        let Some(controllers) = self.controllers_st.clone() else {
+            return;
+        };
+        let mut controllers = controllers.borrow_mut();
         match misc_n {
             0x14 => {
                 let addr = self.at_nc(0x4014);
@@ -436,16 +448,24 @@ impl State {
         }
     }
 
-    fn proc_misc_read(
-        &mut self,
-        controllers: &mut (controller::State, controller::State),
-        misc_n: u8,
-    ) -> u8 {
+    fn proc_misc_read(&mut self, misc_n: u8) -> u8 {
+        let Some(controllers) = self.controllers_st.clone() else {
+            return self.misc[misc_n as usize];
+        };
+        let mut controllers = controllers.borrow_mut();
         match misc_n {
             0x16 => controllers.0.read() | (0x40 << 3),
             0x17 => controllers.1.read() | (0x41 << 3),
             i => self.misc[i as usize],
         }
+    }
+
+    fn proc_mapper_write(&mut self, index: u16, value: u8) {
+        let Some(mapper) = self.mapper_st.clone() else {
+            return;
+        };
+        let mut mapper = mapper.borrow_mut();
+        mapper.bank_switch(self, index, value);
     }
 
     fn assign(&mut self, mut index: u16, value: u8) {
@@ -457,48 +477,39 @@ impl State {
                 index %= 8; // PPU
                 trace!("assign, writing to PPU {}", index);
                 self.ppu[index as usize] = value;
-                if let Some(ppu) = self.ppu_st.clone() {
-                    self.proc_ppu_write(&mut ppu.borrow_mut(), index as u8);
-                }
+                self.proc_ppu_write(index as u8);
             }
             0x4000..0x4020 => {
                 index -= 0x4000;
                 trace!("assign, writing to MISC {}", index);
                 self.misc[index as usize] = value;
-                if let Some(controllers) = self.controllers_st.clone() {
-                    self.proc_misc_write(&mut controllers.borrow_mut(), index as u8);
-                }
+                self.proc_misc_write(index as u8);
             }
             0x4020..=0xFFFF => {
+                self.proc_mapper_write(index, value);
                 index -= 0x4020; // RAM, ROM, catridge stuff
-                self.ctg[index as usize] = value;
+                self.prg[index as usize] = value;
             }
         }
     }
 
-    // Despite involving mutation, this should be used only for reading
+    // Despite involving mutation, this should be used for reading
     fn at(&mut self, mut index: u16) -> u8 {
         match index {
             0..0x2000 => self.mem[index as usize],
             0x2000..0x4000 => {
                 index %= 8; // PPU
                 trace!("at, reading PPU {}", index);
-                if let Some(ppu) = self.ppu_st.clone() {
-                    return self.proc_ppu_read(&mut ppu.borrow_mut(), index as u8);
-                }
-                self.ppu[index as usize]
+                self.proc_ppu_read(index as u8)
             }
             0x4000..0x4020 => {
                 index -= 0x4000;
                 trace!("at, reading MISC {}", index);
-                if let Some(controllers) = self.controllers_st.clone() {
-                    return self.proc_misc_read(&mut controllers.borrow_mut(), index as u8);
-                }
-                self.misc[index as usize]
+                self.proc_misc_read(index as u8)
             }
             0x4020..=0xFFFF => {
                 index -= 0x4020; // RAM, ROM, catridge stuff
-                self.ctg[index as usize]
+                self.prg[index as usize]
             }
         }
     }
@@ -518,7 +529,7 @@ impl State {
             }
             0x4020..=0xFFFF => {
                 index -= 0x4020; // RAM, ROM, catridge stuff
-                self.ctg[index as usize] = value;
+                self.prg[index as usize] = value;
             }
         }
     }
@@ -536,7 +547,7 @@ impl State {
             }
             0x4020..=0xFFFF => {
                 index -= 0x4020; // RAM, ROM, catridge stuff
-                self.ctg[index as usize]
+                self.prg[index as usize]
             }
         }
     }
@@ -565,9 +576,9 @@ impl State {
         return res;
     }
 
-    pub fn load_ctg(&mut self, mut range: Range<usize>, from: &[u8]) {
+    pub fn load_prg(&mut self, mut range: Range<usize>, from: &[u8]) {
         range = range.start - 0x4020..range.end - 0x4020;
-        self.ctg[range].copy_from_slice(from);
+        self.prg[range].copy_from_slice(from);
     }
 
     fn addrmode_in8(&mut self, val: Value) -> u8 {
@@ -1715,7 +1726,6 @@ impl State {
                     Self::an_incantation(&self.curr_instr.instr),
                     self.curr_instr.cycle,
                 )),
-                // TODO: Can skip 5
             },
             5 => {
                 let in8 = self.addrmode_in8(val);
@@ -2025,10 +2035,6 @@ impl State {
         Ok(())
     }
 
-    // TODO: Currently these are baselines,
-    // where cycle accuracy for all the reads, writes, and retrievals are mostly ignored
-    // outside of the main ones and a few exceptions
-    // This should be fixed
     fn delegate_w<F: FnOnce(&mut State) -> u8>(
         &mut self,
         val: Value,
@@ -2446,7 +2452,7 @@ impl State {
             }),
 
             Kil => match curr.cycle {
-                2 => Err(InstrErr::Halt),
+                2 => Err(InstrErr::Halt(self.cycles)),
                 _ => Err(InstrErr::ImpossibleCycle(i, curr.cycle)),
             },
 

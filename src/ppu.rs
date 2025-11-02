@@ -109,7 +109,7 @@ impl State {
                 }
             }
             // Increment scroll y
-            256 if !(240..261).contains(&self.scanline)
+            256 if !(241..261).contains(&self.scanline)
                 && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend) =>
             {
                 if (self.v & 0x7000) != 0x7000 {
@@ -123,7 +123,7 @@ impl State {
                     } else if y == 31 {
                         y = 0;
                     } else {
-                        y += 1;
+                        y = y.wrapping_add(1);
                     }
                     self.v = (self.v & !0x03E0) | (y << 5);
                 }
@@ -146,16 +146,19 @@ impl State {
 
         // Increment coarse scroll x on certain cycles
         match self.cycles {
-            328 | 336 | 8..=256
+            // NOTE: 328 and 336 also theoretically should have increments
+            // However those are the tiles of the next scanline
+            // We don't prefetch, so we don't preincrement
+            8..=256
                 if self.cycles % 8 == 0
                     && !(240..261).contains(&self.scanline)
                     && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend) =>
             {
-                if (self.v & 0x001F) == 31 {
+                if (self.v & 0x001F) == 0x001F {
                     self.v &= !0x001F;
                     self.v ^= 0x0400;
                 } else {
-                    self.v += 1;
+                    self.v = self.v.wrapping_add(1);
                 }
             }
             _ => {}
@@ -171,10 +174,9 @@ impl State {
         if !(240..=261).contains(&self.scanline)
             && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
         {
-            self.eval_draw_sprites(fb_buf.0, cpu);
+            self.eval_draw_sprites(cpu, fb_buf.0);
         }
 
-        // TODO: This offset is suspicious, but required at the moment for the best result
         let pixel_x = self.cycles;
         let pixel_y = self.scanline;
 
@@ -193,8 +195,7 @@ impl State {
 
             let bg_tile = self.mem[tile_addr as usize] as u16;
             let att_table = self.mem[att_table_addr as usize];
-            let att =
-                (att_table >> 2 * ((((pixel_y) >> 3) & 0x2) | (((pixel_x + 16) >> 4) & 0x1))) & 0x3;
+            let att = (att_table >> 2 * (((pixel_y >> 3) & 0x2) | ((pixel_x >> 4) & 0x1))) & 0x3;
 
             let bg_chr_addr = bg_bank | (bg_tile << 4) | ((self.v & 0x7000) >> 12);
 
@@ -215,16 +216,16 @@ impl State {
                 bg_val = 0;
             }
 
-            fb_buf.0[(pixel_y * 256 + pixel_x + 16) as usize].0 =
+            fb_buf.0[(pixel_y * 256 + pixel_x) as usize].0 =
                 self.palette[0] | ((bg_val & 0x3) << 6);
-            fb_buf.0[(pixel_y * 256 + pixel_x + 16) as usize].1 =
+            fb_buf.0[(pixel_y * 256 + pixel_x) as usize].1 =
                 self.palette[bg_val as usize] | ((bg_val & 0xC) << 4);
         }
 
         self.cycles = self.cycles.wrapping_add(1);
     }
 
-    fn eval_draw_sprites(&mut self, buf: &mut [(u8, u8, u8, u8)], cpu: &mut cpu::State) {
+    fn eval_draw_sprites(&mut self, cpu: &mut cpu::State, buf: &mut [(u8, u8, u8, u8)]) {
         match self.cycles {
             1..64 => {
                 self.oam_snd[(self.cycles / 2) as usize] = 0xFF;
@@ -336,12 +337,13 @@ impl State {
                     if self.oam_st.task == 4 {
                         let [y, mut tile, att, x] = self.oam_st.read_sp;
 
-                        let bank =
-                            if (cpu.get_ctrl().s_size && tile & 1 != 0) || cpu.get_ctrl().sp_addr {
-                                0x1000
-                            } else {
-                                0x0
-                            };
+                        let bank = if (cpu.get_ctrl().s_size && tile & 1 != 0)
+                            || (!cpu.get_ctrl().s_size && cpu.get_ctrl().sp_addr)
+                        {
+                            0x1000
+                        } else {
+                            0x0
+                        };
 
                         tile += if cpu.get_ctrl().s_size
                             && (((self.scanline + 1) as u8 - y) % 16) >= 8
@@ -365,8 +367,13 @@ impl State {
 
                         self.draw_tile_scanline(cpu, buf, chr_addr, att, x as u16, y_adj, i);
 
-                        // Doing this might mess up timings
+                        // Doing this right now might mess up timings
                         if self.oam_st.read_n == 0
+                            && buf[(y * 255 + x) as usize].2 > 0
+                            && x != 255
+                            && (x >= 8 || cpu.get_mask().spr_left)
+                            && cpu.get_mask().spr_rend
+                            && cpu.get_mask().bg_rend
                             && !cpu.get_stt().sprite0_hit
                             && buf[(y * 255 + x) as usize].0 > 0
                         {
@@ -412,8 +419,9 @@ impl State {
                     (true, true) => (x + j, y + 7 - i as u16),
                     (true, false) => (x + j, y + i as u16),
                 };
+
                 if buf[(y * 256 + x) as usize].2 != 0 {
-                    match (buf[(y * 256 + x) as usize].3 >> 1) & 0x3 {
+                    match (buf[(y * 256 + x) as usize].3 >> 1) & 0x1 {
                         0 => {
                             buf[(y * 256 + x) as usize].2 = self.palette[val as usize];
                             buf[(y * 256 + x) as usize].3 = att_p_val;
