@@ -4,6 +4,17 @@ use log::{error, trace, warn};
 
 use crate::cpu;
 
+pub static SYS_PALLETE: [u32; 64] = [
+    0x808080, 0x003DA6, 0x0012B0, 0x440096, 0xA1005E, 0xC70028, 0xBA0600, 0x8C1700, 0x5C2F00,
+    0x104500, 0x054A00, 0x00472E, 0x004166, 0x000000, 0x050505, 0x050505, 0xC7C7C7, 0x0077FF,
+    0x2155FF, 0x8237FA, 0xEB2FB5, 0xFF2950, 0xFF2200, 0xD63200, 0xC46200, 0x358000, 0x058F00,
+    0x008A55, 0x0099CC, 0x212121, 0x090909, 0x090909, 0xFEFEFE, 0x0FD7FF, 0x69A2FF, 0xD480FF,
+    0xFF45F3, 0xFF618B, 0xFF8833, 0xFF9C12, 0xFABC20, 0x9FE30E, 0x2BF035, 0x0CF0A4, 0x05FBFF,
+    0x5E5E5E, 0x0D0D0D, 0x0D0D0D, 0xFFFFFF, 0xA6FCFF, 0xB3ECFF, 0xDAABEB, 0xFFA8F9, 0xFFABB3,
+    0xFFD2B0, 0xFFEFA6, 0xFFF79C, 0xD7E895, 0xA6EDAF, 0xA2F2DA, 0x99FFFC, 0xDDDDDD, 0x111111,
+    0x111111,
+];
+
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum Mirror {
@@ -40,6 +51,18 @@ struct OamState {
     task: u8,
 }
 
+#[derive(Default)]
+struct ShiftState {
+    shift_tile_cur_lo: u8,
+    shift_tile_cur_hi: u8,
+    shift_att_cur_lo: u8,
+    shift_att_cur_hi: u8,
+    shift_tile_next_lo: u8,
+    shift_tile_next_hi: u8,
+    shift_att_latch_lo: u8,
+    shift_att_latch_hi: u8,
+}
+
 #[allow(dead_code)]
 pub struct State {
     pub mem: [u8; 0x0800],
@@ -51,6 +74,7 @@ pub struct State {
     pub oam_addr: u8,
     buf: u8,
     oam_st: OamState,
+    shift_st: ShiftState,
     pub v: u16, // VRAM addr
     pub t: u16, // tmp VRAM addr
     pub x: u8,  // fine x scroll
@@ -70,6 +94,7 @@ impl Default for State {
             mirr: Mirror::Horizontal,
             oam_addr: 0,
             oam_st: OamState::default(),
+            shift_st: ShiftState::default(),
             buf: 0,
             v: 0,
             t: 0,
@@ -84,8 +109,6 @@ impl Default for State {
 
 impl State {
     pub fn cycle(&mut self, cpu: &mut cpu::State, buf: &mut [u32]) {
-        let fb_buf: FourByte = buf.into();
-
         match self.cycles {
             341.. => {
                 self.cycles = 0;
@@ -144,15 +167,38 @@ impl State {
             _ => {}
         }
 
-        // Increment coarse scroll x on certain cycles
+        // Increment coarse scroll x on certain cycles, fill next shifts
         match self.cycles {
-            // NOTE: 328 and 336 also theoretically should have increments
-            // However those are the tiles of the next scanline
-            // We don't prefetch, so we don't preincrement
-            8..256
+            328 | 336 | 8..256
                 if self.cycles % 8 == 0
                     && !(240..261).contains(&self.scanline)
                     && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend) =>
+            {
+                let bg_bank = if cpu.get_ctrl().bp_addr { 0x1000 } else { 0x0 };
+                let tile = self.mem[self.mirror_mem(0x2000 | (self.v & 0x0FFF)) as usize] as u16;
+                let att = self.mem[self.mirror_mem(
+                    0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x7),
+                ) as usize];
+
+                let chr_adr = (bg_bank | (tile << 4) | ((self.v >> 12) & 0x7)) as usize;
+
+                self.shift_st.shift_tile_next_lo = self.chr[chr_adr];
+                self.shift_st.shift_tile_next_hi = self.chr[chr_adr | 0x8];
+
+                let att_pick = att >> 2 * (((self.v >> 5) & 0x2) | ((self.v >> 1) & 0x1));
+
+                self.shift_st.shift_att_latch_lo = att_pick & 0x1;
+                self.shift_st.shift_att_latch_hi = (att_pick >> 1) & 0x1;
+
+                if (self.v & 0x001F) == 0x001F {
+                    self.v &= !0x001F;
+                    self.v ^= 0x0400;
+                } else {
+                    self.v = self.v.wrapping_add(1);
+                }
+            }
+            256 if !(240..261).contains(&self.scanline)
+                && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend) =>
             {
                 if (self.v & 0x001F) == 0x001F {
                     self.v &= !0x001F;
@@ -174,11 +220,8 @@ impl State {
         if !(240..261).contains(&self.scanline)
             && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
         {
-            self.eval_draw_sprites(cpu, fb_buf.0);
+            self.eval_draw_sprites(cpu, buf);
         }
-
-        let pixel_x = self.cycles;
-        let pixel_y = self.scanline;
 
         // NOTE: While good correctness is currently the goal, there are lot of parts that get
         // recomputed far more than they need to.
@@ -186,46 +229,61 @@ impl State {
             && !(240..=261).contains(&self.scanline)
             && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
         {
-            let bg_bank = if cpu.get_ctrl().bp_addr { 0x1000 } else { 0x0 };
+            // Get current value in the shift register
+            let att_lo = (self.shift_st.shift_att_cur_lo >> (7 - self.x)) & 0x1;
+            let att_hi = (self.shift_st.shift_att_cur_hi >> (7 - self.x)) & 0x1;
+            let bg_lo = (self.shift_st.shift_tile_cur_lo >> (7 - self.x)) & 0x1;
+            let bg_hi = (self.shift_st.shift_tile_cur_hi >> (7 - self.x)) & 0x1;
 
-            let tile_addr = self.mirror_mem(0x2000 | (self.v & 0x0FFF));
-            let att_table_addr = self.mirror_mem(
-                0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x7),
-            );
-
-            let bg_tile = self.mem[tile_addr as usize] as u16;
-            let att_table = self.mem[att_table_addr as usize];
-            let att = (att_table >> 2 * (((self.v >> 5) & 0x2) | ((self.v >> 1) & 0x1))) & 0x3;
-
-            let bg_chr_addr = bg_bank | (bg_tile << 4) | ((self.v & 0x7000) >> 12);
-
-            let bg_up = (self.chr[(bg_chr_addr | 0x8) as usize] >> (7 - (pixel_x % 8))) & 1;
-            let bg_low = (self.chr[bg_chr_addr as usize] >> (7 - (pixel_x % 8))) & 1;
-
-            let mut bg_val = (att << 2) | (bg_up << 1) | bg_low;
+            let mut val = (att_hi << 3) | (att_lo << 2) | (bg_hi << 1) | bg_lo;
 
             if cpu.get_mask().greyscale {
-                bg_val &= 0x30;
+                val &= 0x30;
             }
 
-            if pixel_x < 8 && !cpu.get_mask().bg_left {
-                bg_val = 0;
+            if (self.cycles < 8 && !cpu.get_mask().bg_left) || !cpu.get_mask().bg_rend {
+                val = 0;
             }
 
-            if !cpu.get_mask().bg_rend {
-                bg_val = 0;
-            }
+            let addr = (self.scanline * 256 + self.cycles) as usize;
 
-            fb_buf.0[(pixel_y * 256 + pixel_x) as usize].0 =
-                self.palette[0] | ((bg_val & 0x3) << 6);
-            fb_buf.0[(pixel_y * 256 + pixel_x) as usize].1 =
-                self.palette[bg_val as usize] | ((bg_val & 0xC) << 4);
+            let sel = val as u32;
+
+            let val = SYS_PALLETE[self.palette[val as usize] as usize];
+
+            let bg = val | (sel << 24);
+
+            buf[addr] = if buf[addr] >> 28 == 0 {
+                bg
+            } else {
+                self.selector(cpu, bg, buf[addr])
+            };
+        }
+
+        // Shift everything
+        match self.cycles {
+            1..256 | 321..=336
+                if !(240..261).contains(&self.scanline)
+                    && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend) =>
+            {
+                self.shift_st.shift_att_cur_lo =
+                    (self.shift_st.shift_att_cur_lo << 1) | self.shift_st.shift_att_latch_lo;
+                self.shift_st.shift_att_cur_hi =
+                    (self.shift_st.shift_att_cur_hi << 1) | self.shift_st.shift_att_latch_hi;
+                self.shift_st.shift_tile_cur_lo =
+                    (self.shift_st.shift_tile_cur_lo << 1) | self.shift_st.shift_tile_next_lo >> 7;
+                self.shift_st.shift_tile_cur_hi =
+                    (self.shift_st.shift_tile_cur_hi << 1) | self.shift_st.shift_tile_next_hi >> 7;
+                self.shift_st.shift_tile_next_lo = (self.shift_st.shift_tile_next_lo << 1) | 1;
+                self.shift_st.shift_tile_next_hi = (self.shift_st.shift_tile_next_hi << 1) | 0;
+            }
+            _ => {}
         }
 
         self.cycles = self.cycles.wrapping_add(1);
     }
 
-    fn eval_draw_sprites(&mut self, cpu: &mut cpu::State, buf: &mut [(u8, u8, u8, u8)]) {
+    fn eval_draw_sprites(&mut self, cpu: &mut cpu::State, buf: &mut [u32]) {
         match self.cycles {
             1..64 => {
                 self.oam_snd[(self.cycles / 2) as usize] = 0xFF;
@@ -321,10 +379,11 @@ impl State {
                 }
                 _ => unreachable!(),
             },
-            257..321 => match self.oam_st.task {
-                0..4 if self.oam_st.read_n < self.oam_st.snd_n => {
+            257..=320 => match self.oam_st.task {
+                0..4 if self.oam_st.read_n < self.oam_st.snd_n && self.oam_st.snd_n != 0 => {
                     self.oam_st.read_sp[self.oam_st.task as usize] =
-                        self.oam_snd[(4 * self.oam_st.read_n + self.oam_st.task) as usize];
+                        self.oam_snd[(4 * (self.oam_st.snd_n - self.oam_st.read_n - 1)
+                            + self.oam_st.task) as usize];
                     self.oam_st.task += 1;
                 }
                 4..8 => {
@@ -335,7 +394,7 @@ impl State {
                     // however, this may not be pixel accurate
                     // where it can matter, e.g. sprite 0 hit
                     if self.oam_st.task == 4 {
-                        let [y, mut tile, att, x] = self.oam_st.read_sp;
+                        let [y, tile, att, x] = self.oam_st.read_sp;
 
                         let bank = if (cpu.get_ctrl().s_size && tile & 1 != 0)
                             || (!cpu.get_ctrl().s_size && cpu.get_ctrl().sp_addr)
@@ -345,42 +404,27 @@ impl State {
                             0x0
                         };
 
-                        tile += if cpu.get_ctrl().s_size
-                            && (((self.scanline + 1) as u8 - y) % 16) >= 8
-                        {
-                            1
-                        } else {
-                            0
-                        };
-
-                        let y_adj = (y + if cpu.get_ctrl().s_size
+                        let tile = if cpu.get_ctrl().s_size
                             && (((self.scanline + 1) as u8 - y) % 16 >= 8)
                         {
-                            8
+                            if att & 0x80 != 0 {
+                                tile
+                            } else {
+                                tile + 1
+                            }
                         } else {
-                            0
-                        }) as u16;
+                            if att & 0x80 != 0 {
+                                tile + 1
+                            } else {
+                                tile
+                            }
+                        };
 
-                        let i = ((self.scanline + 1) as u8 - y) % 8;
+                        let i = ((self.scanline + 1) as u8 - y) % 16;
 
                         let chr_addr = bank | ((tile as u16) << 4);
 
-                        self.draw_tile_scanline(cpu, buf, chr_addr, att, x as u16, y_adj, i);
-
-                        // Doing this right now might mess up timings
-                        if self.oam_st.read_n == 0
-                            && buf[(y * 255 + x) as usize].2 > 0
-                            && x != 255
-                            && (x >= 8 || cpu.get_mask().spr_left)
-                            && cpu.get_mask().spr_rend
-                            && cpu.get_mask().bg_rend
-                            && !cpu.get_stt().sprite0_hit
-                            && buf[(y * 255 + x) as usize].0 > 0
-                        {
-                            let mut stt = cpu.get_stt();
-                            stt.sprite0_hit = true;
-                            cpu.put_stt(stt);
-                        }
+                        self.draw_tile_scanline(cpu, buf, chr_addr, att, x as u16, y as u16, i);
                     }
 
                     self.oam_st.task += 1;
@@ -397,7 +441,7 @@ impl State {
     fn draw_tile_scanline(
         &mut self,
         cpu: &mut cpu::State,
-        buf: &mut [(u8, u8, u8, u8)],
+        buf: &mut [u32],
         chr_addr: u16,
         att: u8,
         x: u16,
@@ -405,14 +449,12 @@ impl State {
         i: u8,
     ) {
         for j in (0..8).rev() {
-            let up = (self.chr[(chr_addr | 0x8 | (i % 8) as u16) as usize] >> j) & 1;
-            let low = (self.chr[(chr_addr | (i % 8) as u16) as usize] >> j) & 1;
+            let lo = (self.chr[(chr_addr | (i % 8) as u16) as usize] >> j) & 1;
+            let hi = (self.chr[(chr_addr | 0x8 | (i % 8) as u16) as usize] >> j) & 1;
 
-            let val = 0x10 | ((att & 0x3) << 2) | (up << 1) | low;
+            let val = 0x10 | ((att & 0x3) << 2) | (hi << 1) | lo;
 
             if cpu.get_mask().spr_rend && (x >= 8 || cpu.get_mask().spr_left) {
-                let att_p_val = (val << 1) | ((att >> 5) & 0x1);
-
                 let (x, y) = match (att & 0x40 != 0, att & 0x80 != 0) {
                     (false, true) => (x + 7 - j, y + 7 - i as u16),
                     (false, false) => (x + 7 - j, y + i as u16),
@@ -420,19 +462,51 @@ impl State {
                     (true, false) => (x + j, y + i as u16),
                 };
 
-                if buf[(y * 256 + x) as usize].2 != 0 {
-                    match (buf[(y * 256 + x) as usize].3 >> 1) & 0x1 {
-                        0 => {
-                            buf[(y * 256 + x) as usize].2 = self.palette[val as usize];
-                            buf[(y * 256 + x) as usize].3 = att_p_val;
-                        }
-                        _ => {}
-                    }
-                } else {
-                    buf[(y * 256 + x) as usize].2 = self.palette[val as usize];
-                    buf[(y * 256 + x) as usize].3 = att_p_val;
-                }
+                let sel = ((val << 2)
+                    | (if self.oam_st.read_n == 0 { 0x2 } else { 0 })
+                    | ((att >> 5) & 0x1)) as u32;
+
+                let val = SYS_PALLETE[self.palette[val as usize] as usize];
+
+                buf[(y * 256 + x) as usize] = val | (sel << 24);
             }
+        }
+    }
+
+    fn sprite0_hit_check(&self, cpu: &mut cpu::State, x: u16) {
+        if !cpu.get_stt().sprite0_hit
+            && cpu.get_mask().spr_rend
+            && cpu.get_mask().bg_rend
+            && x != 255
+        {
+            let mut stt = cpu.get_stt();
+            stt.sprite0_hit = true;
+            cpu.put_stt(stt);
+        }
+    }
+
+    fn selector(&self, cpu: &mut cpu::State, bg: u32, sp: u32) -> u32 {
+        let bg_pal = bg & 0x0FFFFFFF;
+        let bg_p = bg >> 24;
+        let sp_pal = sp & 0x0FFFFFFF;
+        let sp_p = sp >> 24;
+        match (bg_p & 0x3, (sp_p >> 2) & 0x3, sp_p & 0x1) {
+            (0, 0, _) => SYS_PALLETE[self.palette[0] as usize],
+            (0, _s, _) => sp_pal | (sp_p << 24),
+            (_b, 0, _) => bg_pal | (bg_p << 24),
+            (_b, _s, 0) => {
+                if sp_p & 0x2 == 2 {
+                    self.sprite0_hit_check(cpu, self.cycles);
+                }
+                sp_pal | (sp_p << 24)
+            }
+            (_b, _s, 1) => {
+                if sp_p & 0x2 == 2 {
+                    self.sprite0_hit_check(cpu, self.cycles);
+                }
+                bg_pal | (bg_p << 24)
+            }
+            _ => unreachable!(),
         }
     }
 

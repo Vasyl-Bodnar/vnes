@@ -34,17 +34,6 @@ const DELTA: f32 = 1. / 60.;
 // Currently a magicish number that produces the best result
 const CYCLES_PER_FRAME: usize = 89342;
 
-pub static SYS_PALLETE: [u32; 64] = [
-    0x808080, 0x003DA6, 0x0012B0, 0x440096, 0xA1005E, 0xC70028, 0xBA0600, 0x8C1700, 0x5C2F00,
-    0x104500, 0x054A00, 0x00472E, 0x004166, 0x000000, 0x050505, 0x050505, 0xC7C7C7, 0x0077FF,
-    0x2155FF, 0x8237FA, 0xEB2FB5, 0xFF2950, 0xFF2200, 0xD63200, 0xC46200, 0x358000, 0x058F00,
-    0x008A55, 0x0099CC, 0x212121, 0x090909, 0x090909, 0xFEFEFE, 0x0FD7FF, 0x69A2FF, 0xD480FF,
-    0xFF45F3, 0xFF618B, 0xFF8833, 0xFF9C12, 0xFABC20, 0x9FE30E, 0x2BF035, 0x0CF0A4, 0x05FBFF,
-    0x5E5E5E, 0x0D0D0D, 0x0D0D0D, 0xFFFFFF, 0xA6FCFF, 0xB3ECFF, 0xDAABEB, 0xFFA8F9, 0xFFABB3,
-    0xFFD2B0, 0xFFEFA6, 0xFFF79C, 0xD7E895, 0xA6EDAF, 0xA2F2DA, 0x99FFFC, 0xDDDDDD, 0x111111,
-    0x111111,
-];
-
 struct Screen {
     window: Rc<Window>,
     surface: Surface<Rc<Window>, Rc<Window>>,
@@ -81,31 +70,7 @@ fn decide_and_nn_interp(buf: &mut [u32], x: usize) {
     let mut cpy = [0; WIDTH * HEIGHT];
     for i in 0..HEIGHT {
         for j in 0..WIDTH {
-            let pixel = buf[i * WIDTH + j];
-            let (byt3, byt2, byt1, byt0) = (
-                (pixel >> 24) as u8,
-                (pixel >> 16) as u8,
-                (pixel >> 8) as u8,
-                (pixel >> 0) as u8,
-            );
-            // NOTE: bit packing all the information that we need
-            let ext_col = byt0 & 0x3F;
-            let bg_col = byt1 & 0x3F;
-            let bg_idx = (byt0 >> 6) | ((byt1 >> 4) & 0xC);
-            let sp_col = byt2 & 0x3F;
-            let sp_idx = byt3 >> 1;
-            let sp_att = byt3 & 0x1;
-
-            let col = match (bg_idx & 0x3, sp_idx & 0x3, sp_att) {
-                (0, 0, _) => ext_col,
-                (0, _s, _) => sp_col,
-                (_b, 0, _) => bg_col,
-                (_b, _s, 0) => sp_col,
-                (_b, _s, 1) => bg_col,
-                _ => unreachable!(),
-            } as usize;
-
-            cpy[i * WIDTH + j] = SYS_PALLETE[col];
+            cpy[i * WIDTH + j] = buf[i * WIDTH + j] & 0x00FFFFFF;
         }
     }
 
