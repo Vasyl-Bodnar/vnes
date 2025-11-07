@@ -343,7 +343,7 @@ fn main() {
     let mut app = Nes::default();
 
     let mut buf: Vec<u8> = vec![];
-    let mut file = File::open(Path::new("nes/240pee.nes")).unwrap();
+    let mut file = File::open(Path::new("nes/alter.nes")).unwrap();
     file.read_to_end(&mut buf).unwrap();
 
     app.data.parse_nes(buf);

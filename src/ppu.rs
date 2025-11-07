@@ -212,10 +212,7 @@ impl State {
 
         // NOTE: While good correctness is currently the goal, there are lot of parts that get
         // recomputed far more than they need to.
-        if self.cycles < 256
-            && !(240..=261).contains(&self.scanline)
-            && (cpu.get_mask().bg_rend || cpu.get_mask().spr_rend)
-        {
+        if self.cycles < 256 && !(240..=261).contains(&self.scanline) {
             // Get current value in the shift register
             let att_lo = (self.shift_st.att_cur_lo >> (7 - self.x)) & 0x1;
             let att_hi = (self.shift_st.att_cur_hi >> (7 - self.x)) & 0x1;
@@ -289,9 +286,10 @@ impl State {
                         self.oam_st.buf = self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
 
                         let y = self.oam_st.buf;
-                        if y < 0xEF && (y..y + 8).contains(&((self.scanline + 1) as u8))
-                            || (cpu.get_ctrl().s_size
-                                && (y..y + 16).contains(&((self.scanline + 1) as u8)))
+                        if y < 0xEF
+                            && ((y..y + 8).contains(&((self.scanline + 1) as u8))
+                                || (cpu.get_ctrl().s_size
+                                    && (y..y + 16).contains(&((self.scanline + 1) as u8))))
                         {
                             self.oam_st.task = 2;
                         } else {
@@ -332,9 +330,10 @@ impl State {
                 }
                 4 => {
                     let y = self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
-                    if y < 0xEF && (y..y + 8).contains(&((self.scanline + 1) as u8))
-                        || (cpu.get_ctrl().s_size
-                            && (y..y + 16).contains(&((self.scanline + 1) as u8)))
+                    if y < 0xEF
+                        && ((y..y + 8).contains(&((self.scanline + 1) as u8))
+                            || (cpu.get_ctrl().s_size
+                                && (y..y + 16).contains(&((self.scanline + 1) as u8))))
                     {
                         let mut stt = cpu.get_stt();
                         stt.sprite_overflow = true;
@@ -466,7 +465,16 @@ impl State {
 
     fn selector(&self, cpu: &mut cpu::State, bg: u8, sp: u8) -> u32 {
         SYS_PALLETE[self.palette[match (bg & 0x3, sp & 0x3, (sp >> 5) & 0x1) {
-            (0, 0, _) => 0,
+            (0, 0, _) => {
+                if !cpu.get_mask().spr_rend
+                    && !cpu.get_mask().bg_rend
+                    && (0x3F00..0x4000).contains(&self.v)
+                {
+                    ((self.v - 0x3F00) & 0x1F) as u8
+                } else {
+                    0
+                }
+            }
             (0, _s, _) => sp & 0x1F,
             (_b, 0, _) => bg & 0xF,
             (_b, _s, 0) => {
@@ -524,14 +532,14 @@ impl State {
                 trace!("Read MEM! {:x} from {:x}", self.buf, self.v);
                 res
             }
-            0x3000..0x3f00 => {
+            0x3000..0x3F00 => {
                 let res = self.buf;
                 self.buf = self.mem[self.mirror_mem(self.v - 0x1000) as usize];
                 trace!("Read MEM MIR! {:x} from {:x}", self.buf, self.v);
                 res
             }
-            0x3f00..0x4000 => {
-                let res = self.palette[((self.v - 0x3f00) % 32) as usize];
+            0x3F00..0x4000 => {
+                let res = self.palette[((self.v - 0x3F00) & 0x1F) as usize];
                 trace!("Read PALT! {:x} from {:x}", res, self.v);
                 res
             }
@@ -560,12 +568,21 @@ impl State {
                 self.mem[self.mirror_mem(self.v) as usize] = value;
                 trace!("Write MEM! {:x} to {:x}", value, self.v);
             }
-            0x3000..0x3f00 => {
+            0x3000..0x3F00 => {
                 self.mem[self.mirror_mem(self.v - 0x1000) as usize] = value;
                 trace!("Write MEM MIR! {:x} to {:x}", value, self.v);
             }
-            0x3f00..0x4000 => {
-                self.palette[((self.v - 0x3f00) % 32) as usize] = value;
+            0x3F00..0x4000 if self.v & 0x1F == 0x00 || self.v & 0x1F == 0x10 => {
+                self.palette[0x00] = value;
+                self.palette[0x10] = value;
+                trace!(
+                    "Write PALT0! {:x} to {:x} (0x3F00 and 0x3F10)",
+                    value,
+                    self.v
+                );
+            }
+            0x3F00..0x4000 => {
+                self.palette[(self.v & 0x1F) as usize] = value;
                 trace!("Write PALT! {:x} to {:x}", value, self.v);
             }
             _ => {
