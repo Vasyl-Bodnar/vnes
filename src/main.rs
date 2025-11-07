@@ -68,14 +68,9 @@ impl Screen {
 // Both are packaged into one for efficiency purposes
 fn decide_and_nn_interp(buf: &mut [u32], x: usize) {
     let mut cpy = [0; WIDTH * HEIGHT];
-    for i in 0..HEIGHT {
-        for j in 0..WIDTH {
-            cpy[i * WIDTH + j] = buf[i * WIDTH + j] & 0x00FFFFFF;
-        }
-    }
+    cpy.copy_from_slice(&buf[0..WIDTH * HEIGHT]);
 
     if x == 0 || x == 1 {
-        buf.copy_from_slice(&cpy);
         return;
     }
 
@@ -188,10 +183,7 @@ impl NesData {
             if i % 3 == 0 {
                 self.cpu.cycle().unwrap();
             }
-            {
-                let ppu = &mut self.ppu.borrow_mut();
-                ppu.cycle(&mut self.cpu, buf);
-            }
+            self.ppu.borrow_mut().cycle(&mut self.cpu, buf);
         }
     }
 
@@ -351,7 +343,7 @@ fn main() {
     let mut app = Nes::default();
 
     let mut buf: Vec<u8> = vec![];
-    let mut file = File::open(Path::new("nes/alter.nes")).unwrap();
+    let mut file = File::open(Path::new("nes/240pee.nes")).unwrap();
     file.read_to_end(&mut buf).unwrap();
 
     app.data.parse_nes(buf);
