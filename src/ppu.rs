@@ -210,8 +210,6 @@ impl State {
             self.eval_fetch_sprites(cpu);
         }
 
-        // NOTE: While good correctness is currently the goal, there are lot of parts that get
-        // recomputed far more than they need to.
         if self.cycles < 256 && !(240..=261).contains(&self.scanline) {
             // Get current value in the shift register
             let att_lo = (self.shift_st.att_cur_lo >> (7 - self.x)) & 0x1;
@@ -278,7 +276,7 @@ impl State {
                 0 => {}
                 1 => {
                     if self.cycles % 2 == 0 {
-                        if self.oam_st.snd_n <= 8 {
+                        if self.oam_st.snd_n < 8 {
                             self.oam_snd[(4 * self.oam_st.snd_n + self.oam_st.m) as usize] =
                                 self.oam_st.buf;
                         }
@@ -287,9 +285,9 @@ impl State {
 
                         let y = self.oam_st.buf;
                         if y < 0xEF
-                            && ((y..y + 8).contains(&((self.scanline + 1) as u8))
+                            && ((y..y + 8).contains(&(self.scanline as u8))
                                 || (cpu.get_ctrl().s_size
-                                    && (y..y + 16).contains(&((self.scanline + 1) as u8))))
+                                    && (y..y + 16).contains(&(self.scanline as u8))))
                         {
                             self.oam_st.task = 2;
                         } else {
@@ -299,7 +297,7 @@ impl State {
                 }
                 2 => {
                     if self.cycles % 2 == 0 {
-                        if self.oam_st.snd_n <= 8 {
+                        if self.oam_st.snd_n < 8 {
                             if self.oam_st.n == 0 && self.oam_st.m == 2 {
                                 self.oam_st.buf |= 0x4;
                             }
@@ -328,12 +326,13 @@ impl State {
                         self.oam_st.task = 4;
                     }
                 }
+
                 4 => {
                     let y = self.oam[(4 * self.oam_st.n + self.oam_st.m) as usize];
                     if y < 0xEF
-                        && ((y..y + 8).contains(&((self.scanline + 1) as u8))
+                        && ((y..y + 8).contains(&(self.scanline as u8))
                             || (cpu.get_ctrl().s_size
-                                && (y..y + 16).contains(&((self.scanline + 1) as u8))))
+                                && (y..y + 16).contains(&(self.scanline as u8))))
                     {
                         let mut stt = cpu.get_stt();
                         stt.sprite_overflow = true;
@@ -361,7 +360,7 @@ impl State {
                 _ => unreachable!(),
             },
             257..=320 => match self.oam_st.task {
-                0..4 if self.oam_st.read_n < self.oam_st.snd_n => {
+                0..4 if self.oam_st.read_n <= self.oam_st.snd_n => {
                     self.oam_st.read_sp[self.oam_st.task as usize] =
                         self.oam_snd[(4 * self.oam_st.read_n + self.oam_st.task) as usize];
                     self.oam_st.task += 1;
@@ -382,8 +381,7 @@ impl State {
                             0x0
                         };
 
-                        let tile = if cpu.get_ctrl().s_size
-                            && (((self.scanline + 1) as u8 - y) % 16 >= 8)
+                        let tile = if cpu.get_ctrl().s_size && ((self.scanline as u8 - y) % 16 >= 8)
                         {
                             if att & 0x80 == 0 {
                                 (tile & !1) + 1
@@ -400,7 +398,7 @@ impl State {
                             tile
                         };
 
-                        let i = ((self.scanline + 1) as u8 - y) % 8;
+                        let i = (self.scanline as u8 - y) % 8;
 
                         let chr_addr = bank | ((tile as u16) << 4);
 
@@ -452,7 +450,7 @@ impl State {
     }
 
     fn sprite0_hit_check(&self, cpu: &mut cpu::State, x: u16) {
-        if !cpu.get_stt().sprite0_hit
+        if (!cpu.get_stt().sprite0_hit)
             && cpu.get_mask().spr_rend
             && cpu.get_mask().bg_rend
             && x != 255
@@ -464,7 +462,7 @@ impl State {
     }
 
     fn selector(&self, cpu: &mut cpu::State, bg: u8, sp: u8) -> u32 {
-        SYS_PALLETE[self.palette[match (bg & 0x3, sp & 0x3, (sp >> 5) & 0x1) {
+        let pal = self.palette[match (bg & 0x3, sp & 0x3, (sp >> 5) & 0x1) {
             (0, 0, _) => {
                 if !cpu.get_mask().spr_rend
                     && !cpu.get_mask().bg_rend
@@ -490,7 +488,14 @@ impl State {
                 bg & 0xF
             }
             _ => unreachable!(),
-        } as usize] as usize]
+        } as usize] as usize;
+        if pal >= 64 {
+            // TODO: This cannot happen
+            // Yet it happens in 240pee.nes on one test on entrance and a couple on exit
+            SYS_PALLETE[0]
+        } else {
+            SYS_PALLETE[pal]
+        }
     }
 
     fn selector_sp(&self, sp0: u8, sp1: u8) -> u8 {

@@ -20,6 +20,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
+mod apu;
 mod controller;
 mod cpu;
 mod mapper;
@@ -30,7 +31,7 @@ const WIDTH: usize = 256;
 const HEIGHT: usize = 240;
 const SCALE: usize = 3;
 
-const DELTA: f32 = 1. / 60.;
+const DELTA: f32 = 1. / 60.1;
 // Currently a magicish number that produces the best result
 const CYCLES_PER_FRAME: usize = 89342;
 
