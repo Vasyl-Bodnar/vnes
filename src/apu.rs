@@ -1,6 +1,5 @@
 use std::{f32::consts::PI, sync::Arc};
 
-use log::error;
 use ringbuf::{storage::Heap, traits::Producer, wrap::caching::Caching, SharedRb};
 
 use crate::cpu;
@@ -10,10 +9,46 @@ const HPASS1: f32 = -2. * PI * 90. / 48000.;
 const HPASS2: f32 = -2. * PI * 440. / 48000.;
 const LPASS: f32 = -2. * PI * 14000. / 48000.;
 
+trait Channel {
+    fn out(&self) -> u8;
+    fn clock(&mut self);
+    fn qt_clock(&mut self);
+    fn hf_clock(&mut self);
+
+    fn qh_clock(&mut self) {
+        self.qt_clock();
+        self.hf_clock();
+    }
+}
+
 #[derive(Default)]
 pub struct FrameCounter {
     pub mode: bool,
     pub interrupt_inh: bool,
+}
+
+#[derive(Default)]
+pub struct Timer {
+    // 11 bits total
+    pub timer_lo: u8, // 8 bits
+    pub timer_hi: u8, // 3 bits
+}
+
+impl Timer {
+    fn inc_time(&mut self) -> u16 {
+        let time = (self.time() + 1) % 0x7FF;
+        self.set_time(time);
+        time
+    }
+
+    fn time(&self) -> u16 {
+        (self.timer_lo as u16) | (((self.timer_hi & 0x7) as u16) << 8)
+    }
+
+    fn set_time(&mut self, timer: u16) {
+        self.timer_lo = (timer & 0xFF) as u8;
+        self.timer_hi = ((timer & 0x700) >> 8) as u8;
+    }
 }
 
 #[derive(Default)]
@@ -80,15 +115,15 @@ pub struct Sweep {
 }
 
 impl Sweep {
-    pub fn clock(&mut self, timer: u16) -> Option<u16> {
-        let mut change = (timer >> self.shift) as i16;
+    pub fn clock(&mut self, time: u16) -> Option<u16> {
+        let mut change = (time >> self.shift) as i16;
         if self.negate {
             if self.compliment {
                 change = -change - 1;
             } else {
                 change = -change;
             }
-            self.target = (timer as i16 + change) as u16;
+            self.target = (time as i16 + change) as u16;
         }
 
         let div = self.div.clock();
@@ -116,23 +151,21 @@ impl Sweep {
 pub struct Pulse {
     pub env: Envelope,
     pub sweep: Sweep,
+    pub timer: Timer,
     pub sweep_mute: bool,
     pub seq: u8, // DUTY
 
     pub reset: bool,
     // 0x4000/4
-    pub duty: u8,         // 2 bits
-    pub count_halt: bool, // Also counter's halt
-    // 0x4002/6
-    pub timer_lo: u8,
+    pub duty: u8, // 2 bits
+    pub count_halt: bool,
     // 0x4003/7
     pub length_cnt: u8, // 5 bits
-    pub timer_hi: u8,   // 3 bits
 }
 
-impl Pulse {
-    pub fn out(&self) -> u8 {
-        if self.timer() < 8
+impl Channel for Pulse {
+    fn out(&self) -> u8 {
+        if self.timer.time() < 8
             || ((DUTY_SEQ[self.duty as usize] & (1 << self.seq)) != 0)
             || self.length_cnt == 0
             || self.sweep_mute
@@ -143,39 +176,96 @@ impl Pulse {
         }
     }
 
-    pub fn clock(&mut self) {
-        if self.reset {
-            self.seq = 0;
-            self.env.start = true;
-            self.reset = false;
-        }
-
-        let timer = (self.timer() + 1) % 0x7FF;
-        if timer == 0 {
+    fn clock(&mut self) {
+        let time = self.timer.inc_time();
+        if time == 0 {
             self.seq = (self.seq + 1) % 8;
         }
-        self.set_timer(timer);
     }
 
-    pub fn qh_clock(&mut self) {
-        self.qt_clock();
-        self.hf_clock();
-    }
-
-    pub fn qt_clock(&mut self) {
+    fn qt_clock(&mut self) {
         self.env.clock();
     }
 
-    pub fn hf_clock(&mut self) {
+    fn hf_clock(&mut self) {
         self.dec_length_cnt();
 
-        match self.sweep.clock(self.timer()) {
+        match self.sweep.clock(self.timer.time()) {
             None => self.sweep_mute = false,
             Some(0) => self.sweep_mute = true,
             Some(target) => {
                 self.sweep_mute = false;
-                self.set_timer(target)
+                self.timer.set_time(target)
             }
+        }
+    }
+}
+
+impl Pulse {
+    fn dec_length_cnt(&mut self) {
+        if self.length_cnt > 0 {
+            self.length_cnt -= 1;
+        }
+        if self.count_halt && self.length_cnt == 0 {
+            self.length_cnt = 15;
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Triangle {
+    pub timer: Timer,
+    pub seq: u8,
+    pub linear_rld: bool,
+    pub linear_cnt: u8,
+    // 0x4008
+    pub linear_rld_cnt: u8, // 7 bits
+    pub control: bool,
+    pub count_halt: bool,
+    // 0x400B
+    pub length_cnt: u8, // 5 bits
+}
+
+impl Channel for Triangle {
+    fn out(&self) -> u8 {
+        // TODO: Timer can be set to frequencies too high to even hear,
+        // we do not consider them while our accuracy overall is not high enough to bother
+        if self.timer.time() < 2 || self.length_cnt == 0 || self.linear_cnt == 0 {
+            0
+        } else {
+            if self.seq >= 16 {
+                16 - (self.seq % 16)
+            } else {
+                self.seq
+            }
+        }
+    }
+
+    fn clock(&mut self) {
+        let time = self.timer.inc_time();
+        if time == 0 && self.linear_cnt > 0 && self.length_cnt > 0 {
+            self.seq = (self.seq + 1) % 32;
+        }
+    }
+
+    fn qt_clock(&mut self) {
+        self.dec_linear_cnt();
+    }
+
+    fn hf_clock(&mut self) {
+        self.dec_length_cnt();
+    }
+}
+
+impl Triangle {
+    fn dec_linear_cnt(&mut self) {
+        if !self.control {
+            self.linear_rld = false;
+        }
+        if self.linear_rld {
+            self.linear_cnt = self.linear_rld_cnt;
+        } else {
+            self.linear_cnt -= 1;
         }
     }
 
@@ -187,31 +277,94 @@ impl Pulse {
             self.length_cnt = 15;
         }
     }
-
-    fn timer(&self) -> u16 {
-        (self.timer_lo as u16) | ((self.timer_hi as u16) << 8)
-    }
-
-    fn set_timer(&mut self, timer: u16) {
-        self.timer_lo = (timer & 0xFF) as u8;
-        self.timer_hi = ((timer & 0x700) >> 8) as u8;
-    }
 }
-
-#[derive(Default)]
-pub struct Triangle {}
 
 #[derive(Default)]
 pub struct Noise {}
 
-pub struct State {
-    cycles: u16,
-    pub avg: f32,
+#[derive(Default, Clone, Copy)]
+pub struct Status {
+    dmc_int: bool,
+    frame_int: bool,
+    _unknown: bool,
+    dmc: bool,
+    noise: bool,
+    tri: bool,
+    pulse1: bool,
+    pulse0: bool,
+}
+
+impl From<u8> for Status {
+    fn from(value: u8) -> Self {
+        Self {
+            dmc_int: value & 0x80 != 0,
+            frame_int: value & 0x40 != 0,
+            _unknown: value & 0x20 != 0,
+            dmc: value & 0x10 != 0,
+            noise: value & 0x08 != 0,
+            tri: value & 0x04 != 0,
+            pulse1: value & 0x02 != 0,
+            pulse0: value & 0x01 != 0,
+        }
+    }
+}
+
+impl From<Status> for u8 {
+    fn from(value: Status) -> Self {
+        let mut byte = 0;
+        if value.dmc_int {
+            byte |= 1;
+        }
+        if value.frame_int {
+            byte |= 2;
+        }
+        if value._unknown {
+            byte |= 4;
+        }
+        if value.dmc {
+            byte |= 8;
+        }
+        if value.noise {
+            byte |= 16;
+        }
+        if value.tri {
+            byte |= 32;
+        }
+        if value.pulse1 {
+            byte |= 64;
+        }
+        if value.pulse0 {
+            byte |= 128;
+        }
+        byte
+    }
+}
+
+#[derive(Default)]
+struct Filter {
     pub hp1_prev_unfil: f32,
     pub hp1_prev_fil: f32,
     pub hp2_prev_unfil: f32,
     pub hp2_prev_fil: f32,
     pub lp_prev_fil: f32,
+}
+
+impl Filter {
+    fn filter(&mut self, cur: f32) -> f32 {
+        let s1 = f32::exp(HPASS1) * (self.hp1_prev_fil + cur - self.hp2_prev_unfil);
+        (self.hp1_prev_fil, self.hp1_prev_unfil) = (s1, cur);
+        let s2 = f32::exp(HPASS2) * (self.hp2_prev_fil + s1 - self.hp2_prev_unfil);
+        (self.hp2_prev_fil, self.hp2_prev_unfil) = (s2, s1);
+        let s3 = f32::exp(LPASS) * s2 + ((1. - f32::exp(LPASS)) * self.lp_prev_fil);
+        self.lp_prev_fil = s3;
+        s3
+    }
+}
+
+pub struct State {
+    cycles: u16,
+    pub avg: f32,
+    filter: Filter,
     pub buf: Caching<Arc<SharedRb<Heap<f32>>>, true, false>,
     pub framecnt: FrameCounter,
     pub pulse0: Pulse,
@@ -227,17 +380,13 @@ impl Default for State {
         State {
             cycles: 0,
             avg: 0.,
-            hp1_prev_unfil: 0.,
-            hp1_prev_fil: 0.,
-            hp2_prev_unfil: 0.,
-            hp2_prev_fil: 0.,
-            lp_prev_fil: 0.,
             pulse0,
-            buf: Caching::new(Arc::new(SharedRb::new(1))),
             pulse1: Default::default(),
-            tri: Default::default(),
             noise: Default::default(),
+            tri: Default::default(),
             framecnt: Default::default(),
+            filter: Default::default(),
+            buf: Caching::new(Arc::new(SharedRb::new(1))),
         }
     }
 }
@@ -245,50 +394,56 @@ impl Default for State {
 impl State {
     fn mix(&self) -> f32 {
         let pulse = (self.pulse0.out() + self.pulse1.out()) as f32;
-        if pulse == 0. {
+        let pulse = if pulse == 0. {
             0.
         } else {
             95.88 / ((8128. / pulse) + 100.)
-        }
+        };
+
+        let tnd = (self.tri.out() as f32) / 8227.; //+ self.noise.out() + self.dmc.out();
+        let tnd = if tnd == 0. {
+            0.
+        } else {
+            159.79 / ((1. / tnd) + 100.)
+        };
+
+        pulse + tnd
     }
 
-    fn filter(&mut self, cur: f32) -> f32 {
-        let s1 = f32::exp(HPASS1) * (self.hp1_prev_fil + cur - self.hp2_prev_unfil);
-        (self.hp1_prev_fil, self.hp1_prev_unfil) = (s1, cur);
-        let s2 = f32::exp(HPASS2) * (self.hp2_prev_fil + s1 - self.hp2_prev_unfil);
-        (self.hp2_prev_fil, self.hp2_prev_unfil) = (s2, s1);
-        let s3 = f32::exp(LPASS) * s2 + ((1. - f32::exp(LPASS)) * self.lp_prev_fil);
-        self.lp_prev_fil = s3;
-        s3
+    fn qt_clock(&mut self) {
+        self.pulse0.qt_clock();
+        self.pulse1.qt_clock();
+        self.tri.qt_clock();
+    }
+
+    fn qh_clock(&mut self) {
+        self.pulse0.qh_clock();
+        self.pulse1.qh_clock();
+        self.tri.qh_clock();
     }
 
     pub fn cycle(&mut self, cpu: &mut cpu::State, cpu_cycle: bool) {
         if cpu_cycle {
             // Triangle wave clocks on cpu time
-            //self.tri.clock();
+            self.tri.clock();
             return;
         }
 
         match self.cycles {
             // quarter frame, clock envelopes and triangle linear counter
             3728 | 11185 => {
-                self.pulse0.qt_clock();
-                self.pulse1.qt_clock();
+                self.qt_clock();
             }
             // quarter and half frame, also do sweep units and length counters
             7456 => {
-                self.pulse0.hf_clock();
-                self.pulse1.hf_clock();
+                self.qh_clock();
             }
-            // quarter frame
             // quarter and half frame
             14914 if !self.framecnt.mode => {
                 if !self.framecnt.interrupt_inh {
                     cpu.irq = true;
                 }
-
-                self.pulse0.qh_clock();
-                self.pulse1.qh_clock();
+                self.qh_clock();
             }
             // reset
             14915 if !self.framecnt.mode => {
@@ -299,8 +454,7 @@ impl State {
             }
             // quarter and half frame
             18640 if self.framecnt.mode => {
-                self.pulse0.qh_clock();
-                self.pulse1.qh_clock();
+                self.qh_clock();
             }
             // reset
             18641 if self.framecnt.mode => {
@@ -313,10 +467,9 @@ impl State {
         self.pulse1.clock();
         self.cycles = self.cycles.wrapping_add(1);
 
-        // TODO: Hardcoded assumption
+        // TODO: Hardcoded assumption of timing
         if self.cycles as usize % 37 == 0 {
-            self.avg = self.filter(self.avg / 37.);
-            //error!("{}", self.avg);
+            self.avg = self.filter.filter(self.avg / 37.);
             let _ = self.buf.try_push(self.avg);
             self.avg = 0.;
         } else {

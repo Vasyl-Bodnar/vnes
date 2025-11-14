@@ -213,8 +213,8 @@ impl NesData {
 
         self.apu.borrow_mut().buf = prod;
 
-        error!("{:?}", dev.name().unwrap());
-        error!("{:?}", supported);
+        println!("Audio Device {:?}", dev.name().unwrap());
+        println!("Autoconfig {:?}", supported);
 
         self.stream = dev
             .build_output_stream(

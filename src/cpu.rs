@@ -449,6 +449,7 @@ impl State {
         } else {
             &mut apu.pulse1
         };
+        // TODO: This should probably be handled in the APU
         match misc_n {
             0x00 | 0x04 => {
                 pulse.duty = (val & 0xC0) >> 6;
@@ -469,12 +470,25 @@ impl State {
                 pulse.sweep.reload = true;
             }
             0x02 | 0x06 => {
-                pulse.timer_lo = val;
+                pulse.timer.timer_lo = val;
             }
             0x03 | 0x07 => {
                 pulse.length_cnt = (val & 0xF8) >> 3;
-                pulse.timer_hi = val & 0x07;
+                pulse.timer.timer_hi = val & 0x07;
                 pulse.reset = true;
+            }
+            0x08 => {
+                apu.tri.control = val & 0x80 != 0;
+                apu.tri.count_halt = val & 0x80 != 0;
+                apu.tri.linear_rld_cnt = val & 0x7F;
+            }
+            0x0A => {
+                apu.tri.timer.timer_lo = val;
+            }
+            0x0B => {
+                apu.tri.length_cnt = (val & 0xF8) >> 3;
+                apu.tri.timer.timer_hi = val & 0x07;
+                apu.tri.linear_rld = true;
             }
             0x14 => {
                 let addr = val;
