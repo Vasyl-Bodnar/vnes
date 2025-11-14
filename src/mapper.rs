@@ -44,7 +44,7 @@ impl State {
                     error!("Failed to load PRG");
                 }
 
-                if (chr_s == 0 && mapper.chr.len() != 0) || chr_s == 1 {
+                if (chr_s == 0 && !mapper.chr.is_empty()) || chr_s == 1 {
                     ppu.load_chr(0..0x2000, &mapper.chr[0..0x2000]);
                 } else if chr_s == 0 {
                 } else {

@@ -8,8 +8,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+use cpal::{
+    default_host,
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    OutputCallbackInfo, Stream,
+};
 use env_logger::Builder;
 use log::{error, warn};
+use ringbuf::{
+    storage::Heap,
+    traits::{Consumer, Split},
+    SharedRb,
+};
 use softbuffer::{Context, Surface};
 use winit::{
     application::ApplicationHandler,
@@ -31,9 +41,9 @@ const WIDTH: usize = 256;
 const HEIGHT: usize = 240;
 const SCALE: usize = 3;
 
-const DELTA: f32 = 1. / 60.1;
+const DELTA: f32 = 1. / 60.0988;
 // Currently a magicish number that produces the best result
-const CYCLES_PER_FRAME: usize = 89342;
+const PPU_CYCLES_PER_FRAME: usize = 89342;
 
 struct Screen {
     window: Rc<Window>,
@@ -85,10 +95,12 @@ fn decide_and_nn_interp(buf: &mut [u32], x: usize) {
 }
 
 struct NesData {
+    apu: Rc<RefCell<apu::State>>,
     ppu: Rc<RefCell<ppu::State>>,
     mapper: Rc<RefCell<mapper::State>>,
     controllers: Rc<RefCell<(controller::State, controller::State)>>,
     cpu: cpu::State,
+    stream: Option<Stream>,
     budget: Duration,
     now: Instant,
 }
@@ -96,10 +108,12 @@ struct NesData {
 impl Default for NesData {
     fn default() -> Self {
         NesData {
+            apu: Rc::new(RefCell::new(apu::State::default())),
             ppu: Default::default(),
             mapper: Default::default(),
             controllers: Default::default(),
             cpu: Default::default(),
+            stream: Default::default(),
             budget: Duration::new(0, 0),
             now: Instant::now(),
         }
@@ -107,13 +121,21 @@ impl Default for NesData {
 }
 
 impl NesData {
-    fn parse_nes(&mut self, buf: Vec<u8>) {
+    fn reset(&mut self) {
+        if self.cpu.apu_st.is_none() {
+            self.cpu.apu_st = Some(self.apu.clone());
+        }
         if self.cpu.ppu_st.is_none() {
             self.cpu.ppu_st = Some(self.ppu.clone());
         }
         if self.cpu.controllers_st.is_none() {
             self.cpu.controllers_st = Some(self.controllers.clone());
         }
+        self.cpu.reset = true;
+    }
+
+    pub fn parse_nes(&mut self, buf: Vec<u8>) {
+        self.reset();
 
         let sig = &buf[0..16];
 
@@ -173,16 +195,49 @@ impl NesData {
             ppu.mirr = ppu::Mirror::Horizontal;
         }
 
-        cpu.reset = true;
-
         self.cpu.mapper_st = Some(self.mapper.clone());
     }
 
-    // NOTE: This is more so fun than being "accurate"
+    pub fn setup_sound(&mut self) {
+        let host = default_host();
+        let dev = host.default_output_device().expect("No device found");
+        let supported = dev
+            .supported_output_configs()
+            .expect("Can't query configs")
+            .filter(|x| x.sample_format() == cpal::SampleFormat::F32)
+            .next()
+            .expect("No configs")
+            .with_max_sample_rate();
+        // TODO: making an extra assumption here
+        let (prod, mut cons) = SharedRb::<Heap<f32>>::new(7196).split();
+
+        self.apu.borrow_mut().buf = prod;
+
+        error!("{:?}", dev.name().unwrap());
+        error!("{:?}", supported);
+
+        self.stream = dev
+            .build_output_stream(
+                &supported.config(),
+                move |data: &mut [f32], _: &OutputCallbackInfo| {
+                    for sample in data.iter_mut() {
+                        *sample = cons.try_pop().unwrap_or(0.).clamp(-1., 1.);
+                    }
+                },
+                |err| error!("{:?}", err),
+                None,
+            )
+            .ok();
+    }
+
     fn frame(&mut self, buf: &mut [u32]) {
-        for i in 0..CYCLES_PER_FRAME {
+        for i in 0..PPU_CYCLES_PER_FRAME {
             if i % 3 == 0 {
                 self.cpu.cycle().unwrap();
+                self.apu.borrow_mut().cycle(&mut self.cpu, true);
+            }
+            if i % 6 == 0 {
+                self.apu.borrow_mut().cycle(&mut self.cpu, false);
             }
             self.ppu.borrow_mut().cycle(&mut self.cpu, buf);
         }
@@ -347,7 +402,9 @@ fn main() {
     let mut file = File::open(Path::new("nes/alter.nes")).unwrap();
     file.read_to_end(&mut buf).unwrap();
 
+    app.data.setup_sound();
     app.data.parse_nes(buf);
+    let _ = app.data.stream.as_ref().unwrap().play();
 
     let _ = app.run();
 }

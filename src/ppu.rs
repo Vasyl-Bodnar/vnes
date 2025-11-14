@@ -71,7 +71,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let st = State {
+        State {
             chr: [0; 0x2000],
             mem: [0; 0x0800],
             palette: [0; 32],
@@ -89,8 +89,7 @@ impl Default for State {
             w: 0,
             scanline: 0,
             cycles: 0,
-        };
-        st
+        }
     }
 }
 
@@ -172,7 +171,7 @@ impl State {
                 self.shift_st.tile_next_lo = self.chr[chr_adr];
                 self.shift_st.tile_next_hi = self.chr[chr_adr | 0x8];
 
-                let att_pick = att >> 2 * (((self.v >> 5) & 0x2) | ((self.v >> 1) & 0x1));
+                let att_pick = att >> (2 * (((self.v >> 5) & 0x2) | ((self.v >> 1) & 0x1)));
 
                 self.shift_st.att_latch_lo = att_pick & 0x1;
                 self.shift_st.att_latch_hi = (att_pick >> 1) & 0x1;
@@ -248,7 +247,7 @@ impl State {
                 self.shift_st.tile_cur_hi =
                     (self.shift_st.tile_cur_hi << 1) | self.shift_st.tile_next_hi >> 7;
                 self.shift_st.tile_next_lo = (self.shift_st.tile_next_lo << 1) | 1;
-                self.shift_st.tile_next_hi = (self.shift_st.tile_next_hi << 1) | 0;
+                self.shift_st.tile_next_hi = self.shift_st.tile_next_hi << 1; // | 0
             }
             _ => {}
         }
@@ -318,7 +317,7 @@ impl State {
                 }
                 3 => {
                     self.oam_st.n += 1;
-                    if self.oam_st.n > 64 {
+                    if self.oam_st.n >= 64 {
                         self.oam_st.task = 0;
                     } else if self.oam_st.snd_n < 8 {
                         self.oam_st.task = 1;
@@ -360,7 +359,7 @@ impl State {
                 _ => unreachable!(),
             },
             257..=320 => match self.oam_st.task {
-                0..4 if self.oam_st.read_n <= self.oam_st.snd_n => {
+                0..4 if self.oam_st.read_n < self.oam_st.snd_n => {
                     self.oam_st.read_sp[self.oam_st.task as usize] =
                         self.oam_snd[(4 * self.oam_st.read_n + self.oam_st.task) as usize];
                     self.oam_st.task += 1;

@@ -2,6 +2,7 @@ use std::{cell::RefCell, fmt::Debug, ops::Range, rc::Rc};
 
 use log::trace;
 
+use crate::apu;
 use crate::controller;
 use crate::mapper;
 use crate::ppu;
@@ -32,7 +33,7 @@ impl Debug for Status {
             self.one as u8,
             self.overflow as u8,
             self.negative as u8,
-            u8::from(self.clone()),
+            u8::from(*self),
         )
     }
 }
@@ -64,7 +65,7 @@ impl From<Status> for u8 {
         if p.negative {
             res |= 128;
         }
-        return res;
+        res
     }
 }
 
@@ -176,7 +177,7 @@ pub enum InstrErr {
     Bubble,
 }
 
-// So this practically handles step by step creation of an instr
+// This practically handles step by step creation of an instr
 type Partial = Result<Instr, Box<dyn Fn(u16) -> Instr>>;
 type Unrefined = Result<Partial, u8>;
 
@@ -209,6 +210,7 @@ struct CurrWork {
     oam_odd: bool,
 }
 
+type APURef = Rc<RefCell<apu::State>>;
 type PPURef = Rc<RefCell<ppu::State>>;
 type CntrsRef = Rc<RefCell<(controller::State, controller::State)>>;
 type MapperRef = Rc<RefCell<mapper::State>>;
@@ -225,7 +227,9 @@ pub struct State {
     curr_work: CurrWork,
     buf: u8,
     pub cycles: u64,
+    pub irq: bool,
     pub reset: bool,
+    pub apu_st: Option<APURef>,
     pub ppu_st: Option<PPURef>,
     pub controllers_st: Option<CntrsRef>,
     pub mapper_st: Option<MapperRef>,
@@ -271,6 +275,8 @@ impl Default for State {
             buf: 0,
             cycles: 0,
             reset: true,
+            irq: false,
+            apu_st: None,
             ppu_st: None,
             controllers_st: None,
             mapper_st: None,
@@ -320,7 +326,7 @@ impl State {
 
     fn push8_stack(&mut self, val: u8) {
         let s = self.s as u16;
-        self.assign(0x0100 as u16 + s, val);
+        self.assign(0x0100 + s, val);
         self.s = self.s.wrapping_sub(1);
     }
 
@@ -407,8 +413,8 @@ impl State {
             2 => {
                 ppu.w = 0;
                 let res = self.buf;
-                self.buf = self.get_stt().clone().into();
-                let mut new = self.get_stt().clone();
+                self.buf = self.get_stt().into();
+                let mut new = self.get_stt();
                 new.vblank = false;
                 self.put_stt(new);
                 res
@@ -427,32 +433,77 @@ impl State {
         }
     }
 
+    // TODO: APU and Controllers are needlessly coupled
     fn proc_misc_write(&mut self, misc_n: u8) {
-        let Some(controllers) = self.controllers_st.clone() else {
+        let (Some(controllers), Some(apu)) = (self.controllers_st.clone(), self.apu_st.clone())
+        else {
             return;
         };
         let mut controllers = controllers.borrow_mut();
+        let mut apu = apu.borrow_mut();
+
+        let val = self.at_nc(0x4000 + misc_n as u16);
+
+        let pulse = if misc_n == 0x00 {
+            &mut apu.pulse0
+        } else {
+            &mut apu.pulse1
+        };
         match misc_n {
+            0x00 | 0x04 => {
+                pulse.duty = (val & 0xC0) >> 6;
+
+                pulse.count_halt = val & 0x20 != 0;
+                pulse.env.lop = val & 0x20 != 0;
+
+                pulse.env.constn = val & 0x10 != 0;
+
+                pulse.env.vol = val & 0x0F;
+                pulse.env.div.period = val & 0x0F;
+            }
+            0x01 | 0x05 => {
+                pulse.sweep.enable = val & 0x80 != 0;
+                pulse.sweep.div.period = (val & 0x70) >> 4;
+                pulse.sweep.negate = val & 0x08 != 0;
+                pulse.sweep.shift = val & 0x07;
+                pulse.sweep.reload = true;
+            }
+            0x02 | 0x06 => {
+                pulse.timer_lo = val;
+            }
+            0x03 | 0x07 => {
+                pulse.length_cnt = (val & 0xF8) >> 3;
+                pulse.timer_hi = val & 0x07;
+                pulse.reset = true;
+            }
             0x14 => {
-                let addr = self.at_nc(0x4014);
+                let addr = val;
                 self.curr_work.oam_dma = true;
                 self.curr_work.oam_addr = (addr as u16) << 8;
                 self.curr_work.oam_odd = false;
             }
             0x16 => {
-                let val = self.at_nc(0x4016);
                 controllers.0.write_strobe(val);
                 controllers.1.write_strobe(val);
+            }
+            0x17 => {
+                apu.framecnt.mode = val & 0x80 != 0;
+                apu.framecnt.interrupt_inh = val & 0x40 != 0;
+                if apu.framecnt.interrupt_inh {
+                    self.irq = false;
+                }
             }
             _ => (),
         }
     }
 
     fn proc_misc_read(&mut self, misc_n: u8) -> u8 {
-        let Some(controllers) = self.controllers_st.clone() else {
+        let (Some(controllers), Some(apu)) = (self.controllers_st.clone(), self.apu_st.clone())
+        else {
             return self.misc[misc_n as usize];
         };
         let mut controllers = controllers.borrow_mut();
+        let mut apu = apu.borrow_mut();
         match misc_n {
             0x16 => controllers.0.read() | (0x40 << 3),
             0x17 => controllers.1.read() | (0x41 << 3),
@@ -493,7 +544,7 @@ impl State {
         }
     }
 
-    // Despite involving mutation, this should be used for reading
+    // NOTE: Despite involving mutation, this should be used for reading
     fn at(&mut self, mut index: u16) -> u8 {
         match index {
             0..0x2000 => self.mem[index as usize],
@@ -556,7 +607,7 @@ impl State {
         self.at(idx) as u16 + ((self.at(idx.wrapping_add(1)) as u16) << 8)
     }
 
-    // Bug with page crossing
+    // NOTE: Intended bug with page crossing
     fn at16_p(&mut self, idx: u16) -> u16 {
         if (idx & 0xFF) == 0xFF {
             self.at(idx) as u16 + ((self.at(idx ^ 0xFF) as u16) << 8)
@@ -567,13 +618,13 @@ impl State {
 
     fn pop8_stack(&mut self) -> u8 {
         self.s = self.s.wrapping_add(1);
-        return self.at(0x0100 as u16 + self.s as u16);
+        self.at(0x0100 + self.s as u16)
     }
 
     fn pop16_stack(&mut self) -> u16 {
         let mut res = self.pop8_stack() as u16;
         res |= (self.pop8_stack() as u16) << 8;
-        return res;
+        res
     }
 
     pub fn load_prg(&mut self, mut range: Range<usize>, from: &[u8]) {
@@ -664,7 +715,7 @@ impl State {
         }
     }
 
-    // waste a cycle
+    // Waste a cycle
     fn plus_zero(&mut self) {
         self.curr_instr.cycle += 1;
         self.at(self.pc);
@@ -693,6 +744,36 @@ impl State {
         }
     }
 
+    fn int_irq(&mut self) -> Result<(), InstrErr> {
+        match self.curr_instr.cycle {
+            0..3 => (),
+            3 => self.push8_stack((self.pc >> 8) as u8),
+            4 => self.push8_stack(self.pc as u8),
+            5 => {
+                self.p.b_flag = false;
+                self.push8_stack(Into::<u8>::into(self.p));
+            }
+            6 => {
+                self.pc = 0x00FE;
+                self.p.int_dis = true;
+            }
+            7 => {
+                trace!("IRQ!");
+                self.pc |= 0xFF00;
+                self.pc = self.at16(self.pc);
+                return self.finish_instr();
+            }
+            _ => {
+                return Err(InstrErr::ImpossibleCycle(
+                    Instr::Brk(Value::Impl),
+                    self.curr_instr.cycle,
+                ))
+            }
+        }
+        self.curr_instr.cycle += 1;
+        Ok(())
+    }
+
     fn int_nmi(&mut self) -> Result<(), InstrErr> {
         match self.curr_instr.cycle {
             0..3 => (),
@@ -701,9 +782,11 @@ impl State {
             5 => {
                 self.p.b_flag = false;
                 self.push8_stack(Into::<u8>::into(self.p));
+            }
+            6 => {
+                self.pc = 0x00FA;
                 self.p.int_dis = true;
             }
-            6 => self.pc = 0x00FA,
             7 => {
                 trace!("NMI!");
                 self.pc |= 0xFF00;
@@ -730,13 +813,14 @@ impl State {
             3 => self.s = self.s.wrapping_sub(1),
             4 => self.s = self.s.wrapping_sub(1),
             5 => self.s = self.s.wrapping_sub(1),
-            6 => self.pc = 0x00FC,
+            6 => {
+                self.pc = 0x00FC;
+                self.p.int_dis = true;
+            }
             7 => {
+                trace!("RESET!");
                 self.pc |= 0xFF00;
                 self.pc = self.at16(self.pc);
-            }
-            8 => {
-                trace!("RESET!");
                 self.reset = false;
                 return self.finish_instr();
             }
@@ -760,8 +844,11 @@ impl State {
                 if self.reset {
                     return self.int_reset();
                 }
-                if (self.get_ctrl().gen_nmi) && (self.get_stt().vblank) {
+                if self.get_ctrl().gen_nmi && self.get_stt().vblank {
                     return self.int_nmi();
+                }
+                if !self.p.int_dis && self.irq {
+                    return self.int_irq();
                 }
                 self.curr_instr.cycle = 1;
                 let res = Err(self.at(self.pc));
@@ -1374,13 +1461,13 @@ impl State {
     }
 
     fn an_incantation(ingr: &Option<Unrefined>) -> Instr {
-        ingr.as_ref()
+        *ingr
+            .as_ref()
             .unwrap()
             .as_ref()
             .unwrap()
             .as_ref()
             .unwrap_or(&Instr::Kil)
-            .clone()
     }
 
     fn rel_branch(&mut self, val: Value, check: bool) -> Result<(), InstrErr> {
@@ -2579,7 +2666,7 @@ impl State {
                 st.zn_check(st.x & val);
             }),
             Axs(val @ Imm(..)) => self.delegate_r(val, |st, val| {
-                st.x = st.a & st.x;
+                st.x &= st.a;
                 st.p.carry = st.x >= val;
                 st.p.iszero = st.x == val;
                 st.p.negative = ((st.x.wrapping_sub(val)) & 128) != 0;

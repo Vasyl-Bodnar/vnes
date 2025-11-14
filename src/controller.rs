@@ -74,14 +74,12 @@ impl State {
     pub fn read(&mut self) -> u8 {
         if self.strobe {
             self.buttons.a as u8
+        } else if self.shift == 0 {
+            1
         } else {
-            if self.shift == 0 {
-                1
-            } else {
-                let res = u8::from(self.buttons) & self.shift != 0;
-                self.shift = self.shift.wrapping_shl(1);
-                res as u8
-            }
+            let res = u8::from(self.buttons) & self.shift != 0;
+            self.shift = self.shift.wrapping_shl(1);
+            res as u8
         }
     }
 }
