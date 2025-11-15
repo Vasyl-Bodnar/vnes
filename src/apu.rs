@@ -467,12 +467,14 @@ impl State {
         self.pulse0.qt_clock();
         self.pulse1.qt_clock();
         self.tri.qt_clock();
+        self.noise.qt_clock();
     }
 
     fn qh_clock(&mut self) {
         self.pulse0.qh_clock();
         self.pulse1.qh_clock();
         self.tri.qh_clock();
+        self.noise.qh_clock();
     }
 
     pub fn cycle(&mut self, cpu: &mut cpu::State, cpu_cycle: bool) {
@@ -518,6 +520,7 @@ impl State {
 
         self.pulse0.clock();
         self.pulse1.clock();
+        self.noise.clock();
         self.cycles = self.cycles.wrapping_add(1);
 
         let decim = crate::CPU_CYCLES_PER_SEC / self.sample_rate as usize;
