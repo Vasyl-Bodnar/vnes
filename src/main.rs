@@ -44,6 +44,7 @@ const SCALE: usize = 3;
 const DELTA: f32 = 1. / 60.0988;
 // Currently a magicish number that produces the best result
 const PPU_CYCLES_PER_FRAME: usize = 89342;
+const CPU_CYCLES_PER_SEC: usize = 1789773;
 
 struct Screen {
     window: Rc<Window>,
@@ -209,9 +210,10 @@ impl NesData {
             .expect("No configs")
             .with_max_sample_rate();
         // TODO: making an extra assumption here
-        let (prod, mut cons) = SharedRb::<Heap<f32>>::new(7196).split();
+        let (prod, mut cons) = SharedRb::<Heap<f32>>::new(4096).split();
 
         self.apu.borrow_mut().buf = prod;
+        self.apu.borrow_mut().sample_rate = supported.sample_rate().0;
 
         println!("Audio Device {:?}", dev.name().unwrap());
         println!("Autoconfig {:?}", supported);
@@ -220,8 +222,9 @@ impl NesData {
             .build_output_stream(
                 &supported.config(),
                 move |data: &mut [f32], _: &OutputCallbackInfo| {
-                    for sample in data.iter_mut() {
-                        *sample = cons.try_pop().unwrap_or(0.).clamp(-1., 1.);
+                    for sample in data.chunks_exact_mut(2) {
+                        sample[0] = cons.try_pop().unwrap_or(0.).clamp(-1., 1.);
+                        sample[1] = cons.try_pop().unwrap_or(0.).clamp(-1., 1.);
                     }
                 },
                 |err| error!("{:?}", err),

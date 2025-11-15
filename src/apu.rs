@@ -52,9 +52,30 @@ impl Timer {
 }
 
 #[derive(Default)]
+pub struct LengthCounter {
+    pub halt: bool,
+    pub length_cnt: u8,
+}
+
+impl LengthCounter {
+    pub fn clock(&mut self) {
+        if self.length_cnt > 0 {
+            self.length_cnt -= 1;
+        }
+        if self.halt && self.length_cnt == 0 {
+            self.length_cnt = 15;
+        }
+    }
+
+    pub fn done(&self) -> bool {
+        self.length_cnt == 0
+    }
+}
+
+#[derive(Default)]
 pub struct Divider {
-    pub period: u8,
-    counter: u8,
+    pub period: u16,
+    counter: u16,
 }
 
 impl Divider {
@@ -74,8 +95,8 @@ pub struct Envelope {
     pub decay: u8,
     pub vol: u8,
     pub lop: bool,
-    pub start: bool,
     pub constn: bool,
+    pub start: bool,
 }
 
 impl Envelope {
@@ -139,7 +160,7 @@ impl Sweep {
         };
 
         if self.reload {
-            self.div.period = self.div.period;
+            self.div.counter = self.div.period;
             self.reload = false;
         }
 
@@ -152,22 +173,20 @@ pub struct Pulse {
     pub env: Envelope,
     pub sweep: Sweep,
     pub timer: Timer,
+    pub length_cnt: LengthCounter,
     pub sweep_mute: bool,
     pub seq: u8, // DUTY
 
     pub reset: bool,
     // 0x4000/4
     pub duty: u8, // 2 bits
-    pub count_halt: bool,
-    // 0x4003/7
-    pub length_cnt: u8, // 5 bits
 }
 
 impl Channel for Pulse {
     fn out(&self) -> u8 {
         if self.timer.time() < 8
             || ((DUTY_SEQ[self.duty as usize] & (1 << self.seq)) != 0)
-            || self.length_cnt == 0
+            || self.length_cnt.done()
             || self.sweep_mute
         {
             0
@@ -188,7 +207,7 @@ impl Channel for Pulse {
     }
 
     fn hf_clock(&mut self) {
-        self.dec_length_cnt();
+        self.length_cnt.clock();
 
         match self.sweep.clock(self.timer.time()) {
             None => self.sweep_mute = false,
@@ -201,36 +220,23 @@ impl Channel for Pulse {
     }
 }
 
-impl Pulse {
-    fn dec_length_cnt(&mut self) {
-        if self.length_cnt > 0 {
-            self.length_cnt -= 1;
-        }
-        if self.count_halt && self.length_cnt == 0 {
-            self.length_cnt = 15;
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct Triangle {
     pub timer: Timer,
+    pub length_cnt: LengthCounter,
     pub seq: u8,
     pub linear_rld: bool,
     pub linear_cnt: u8,
     // 0x4008
     pub linear_rld_cnt: u8, // 7 bits
     pub control: bool,
-    pub count_halt: bool,
-    // 0x400B
-    pub length_cnt: u8, // 5 bits
 }
 
 impl Channel for Triangle {
     fn out(&self) -> u8 {
         // TODO: Timer can be set to frequencies too high to even hear,
         // we do not consider them while our accuracy overall is not high enough to bother
-        if self.timer.time() < 2 || self.length_cnt == 0 || self.linear_cnt == 0 {
+        if self.timer.time() < 2 || self.length_cnt.done() || self.linear_cnt == 0 {
             0
         } else {
             if self.seq >= 16 {
@@ -243,7 +249,7 @@ impl Channel for Triangle {
 
     fn clock(&mut self) {
         let time = self.timer.inc_time();
-        if time == 0 && self.linear_cnt > 0 && self.length_cnt > 0 {
+        if time == 0 && self.linear_cnt > 0 && !self.length_cnt.done() {
             self.seq = (self.seq + 1) % 32;
         }
     }
@@ -253,7 +259,7 @@ impl Channel for Triangle {
     }
 
     fn hf_clock(&mut self) {
-        self.dec_length_cnt();
+        self.length_cnt.clock();
     }
 }
 
@@ -268,19 +274,62 @@ impl Triangle {
             self.linear_cnt -= 1;
         }
     }
+}
 
-    fn dec_length_cnt(&mut self) {
-        if self.length_cnt > 0 {
-            self.length_cnt -= 1;
-        }
-        if self.count_halt && self.length_cnt == 0 {
-            self.length_cnt = 15;
+pub struct Noise {
+    pub env: Envelope,
+    pub length_cnt: LengthCounter,
+    pub div: Divider,
+    pub mode: bool,
+    pub shift: u16,
+}
+
+impl Default for Noise {
+    fn default() -> Self {
+        Self {
+            env: Default::default(),
+            length_cnt: Default::default(),
+            div: Default::default(),
+            mode: false,
+            shift: 1,
         }
     }
 }
 
+impl Channel for Noise {
+    fn out(&self) -> u8 {
+        if self.length_cnt.done() || self.shift & 0x1 != 0 {
+            0
+        } else {
+            self.env.out()
+        }
+    }
+
+    fn clock(&mut self) {
+        if self.div.clock() {
+            let feedback = (self.shift & 0x1)
+                ^ if self.mode {
+                    (self.shift & 0x40) >> 6
+                } else {
+                    (self.shift & 0x2) >> 1
+                };
+            self.shift >>= 1;
+            self.shift &= 0x3FFF;
+            self.shift |= feedback << 14;
+        }
+    }
+
+    fn qt_clock(&mut self) {
+        self.env.clock();
+    }
+
+    fn hf_clock(&mut self) {
+        self.length_cnt.clock();
+    }
+}
+
 #[derive(Default)]
-pub struct Noise {}
+pub struct Dmc {}
 
 #[derive(Default, Clone, Copy)]
 pub struct Status {
@@ -357,7 +406,7 @@ impl Filter {
         (self.hp2_prev_fil, self.hp2_prev_unfil) = (s2, s1);
         let s3 = f32::exp(LPASS) * s2 + ((1. - f32::exp(LPASS)) * self.lp_prev_fil);
         self.lp_prev_fil = s3;
-        s3
+        s3.clamp(-1., 1.)
     }
 }
 
@@ -366,11 +415,13 @@ pub struct State {
     pub avg: f32,
     filter: Filter,
     pub buf: Caching<Arc<SharedRb<Heap<f32>>>, true, false>,
+    pub sample_rate: u32,
     pub framecnt: FrameCounter,
     pub pulse0: Pulse,
     pub pulse1: Pulse,
     pub tri: Triangle,
     pub noise: Noise,
+    pub dmc: Dmc,
 }
 
 impl Default for State {
@@ -384,8 +435,10 @@ impl Default for State {
             pulse1: Default::default(),
             noise: Default::default(),
             tri: Default::default(),
+            dmc: Default::default(),
             framecnt: Default::default(),
             filter: Default::default(),
+            sample_rate: 0,
             buf: Caching::new(Arc::new(SharedRb::new(1))),
         }
     }
@@ -400,7 +453,7 @@ impl State {
             95.88 / ((8128. / pulse) + 100.)
         };
 
-        let tnd = (self.tri.out() as f32) / 8227.; //+ self.noise.out() + self.dmc.out();
+        let tnd = (self.tri.out() as f32) / 8227. + (self.noise.out() as f32) / 12241.; // + self.dmc.out();
         let tnd = if tnd == 0. {
             0.
         } else {
@@ -467,10 +520,10 @@ impl State {
         self.pulse1.clock();
         self.cycles = self.cycles.wrapping_add(1);
 
-        // TODO: Hardcoded assumption of timing
-        if self.cycles as usize % 37 == 0 {
-            self.avg = self.filter.filter(self.avg / 37.);
-            let _ = self.buf.try_push(self.avg);
+        let decim = crate::CPU_CYCLES_PER_SEC / self.sample_rate as usize;
+        if self.cycles as usize % decim == 0 {
+            self.avg = (self.avg + self.mix()) / decim as f32;
+            let _ = self.buf.try_push(self.filter.filter(self.avg));
             self.avg = 0.;
         } else {
             self.avg += self.mix();

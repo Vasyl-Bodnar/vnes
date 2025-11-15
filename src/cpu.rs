@@ -454,17 +454,17 @@ impl State {
             0x00 | 0x04 => {
                 pulse.duty = (val & 0xC0) >> 6;
 
-                pulse.count_halt = val & 0x20 != 0;
+                pulse.length_cnt.halt = val & 0x20 != 0;
                 pulse.env.lop = val & 0x20 != 0;
 
                 pulse.env.constn = val & 0x10 != 0;
 
                 pulse.env.vol = val & 0x0F;
-                pulse.env.div.period = val & 0x0F;
+                pulse.env.div.period = (val & 0x0F) as u16;
             }
             0x01 | 0x05 => {
                 pulse.sweep.enable = val & 0x80 != 0;
-                pulse.sweep.div.period = (val & 0x70) >> 4;
+                pulse.sweep.div.period = ((val & 0x70) >> 4) as u16;
                 pulse.sweep.negate = val & 0x08 != 0;
                 pulse.sweep.shift = val & 0x07;
                 pulse.sweep.reload = true;
@@ -473,23 +473,40 @@ impl State {
                 pulse.timer.timer_lo = val;
             }
             0x03 | 0x07 => {
-                pulse.length_cnt = (val & 0xF8) >> 3;
+                pulse.length_cnt.length_cnt = (val & 0xF8) >> 3;
                 pulse.timer.timer_hi = val & 0x07;
                 pulse.reset = true;
             }
             0x08 => {
                 apu.tri.control = val & 0x80 != 0;
-                apu.tri.count_halt = val & 0x80 != 0;
+                apu.tri.length_cnt.halt = val & 0x80 != 0;
                 apu.tri.linear_rld_cnt = val & 0x7F;
             }
             0x0A => {
                 apu.tri.timer.timer_lo = val;
             }
             0x0B => {
-                apu.tri.length_cnt = (val & 0xF8) >> 3;
+                apu.tri.length_cnt.length_cnt = (val & 0xF8) >> 3;
                 apu.tri.timer.timer_hi = val & 0x07;
                 apu.tri.linear_rld = true;
             }
+            0x0C => {
+                apu.noise.length_cnt.halt = val & 0x20 != 0;
+                apu.noise.env.lop = val & 0x20 != 0;
+
+                apu.noise.env.constn = val & 0x10 != 0;
+
+                apu.noise.env.vol = val & 0x0F;
+                apu.noise.env.div.period = (val & 0x0F) as u16;
+            }
+            0x0E => {
+                const NOISE_PERIOD_LUT: [u16; 16] = [
+                    2, 4, 8, 16, 32, 48, 64, 80, 101, 129, 190, 254, 381, 508, 1017, 2034,
+                ];
+                apu.noise.mode = val & 0x80 != 0;
+                apu.noise.div.period = NOISE_PERIOD_LUT[(val & 0x0F) as usize];
+            }
+            0x0F => {}
             0x14 => {
                 let addr = val;
                 self.curr_work.oam_dma = true;
