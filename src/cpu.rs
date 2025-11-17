@@ -200,14 +200,29 @@ impl Debug for CurrInstr {
 }
 
 #[derive(Default)]
+struct CurrOam {
+    addr: u16,
+    val: u8,
+    halt: bool,
+    dma: bool,
+    fix: bool,
+}
+
+#[derive(Default)]
+struct CurrDmc {
+    time: u8, // These are scheduled 3-4 cycles after
+    halt: bool,
+    dma: bool,
+    fix: bool,
+}
+
+#[derive(Default)]
 struct CurrWork {
     prev_addr: u16,
     hold8: u8,
     hold16: u16,
-    oam_addr: u16,
-    oam_val: u8,
-    oam_dma: bool,
-    oam_odd: bool,
+    oam: CurrOam,
+    dmc: CurrDmc,
 }
 
 type APURef = Rc<RefCell<apu::State>>;
@@ -227,7 +242,6 @@ pub struct State {
     curr_work: CurrWork,
     buf: u8,
     pub cycles: u64,
-    pub irq: bool,
     pub reset: bool,
     pub apu_st: Option<APURef>,
     pub ppu_st: Option<PPURef>,
@@ -275,7 +289,6 @@ impl Default for State {
             buf: 0,
             cycles: 0,
             reset: true,
-            irq: false,
             apu_st: None,
             ppu_st: None,
             controllers_st: None,
@@ -335,18 +348,62 @@ impl State {
         self.push8_stack(val as u8);
     }
 
-    fn do_dma(&mut self, ppu: &mut ppu::State) {
-        if (self.curr_work.oam_addr & 0xFF) == 0xFF {
-            self.curr_work.oam_dma = false;
+    fn do_oam_dma(&mut self, ppu: &mut ppu::State) {
+        if (self.curr_work.oam.addr & 0xFF) == 0xFF {
+            self.curr_work.oam.dma = false;
         }
-        if self.curr_work.oam_odd {
-            ppu.write_oam(self.curr_work.oam_val);
-            self.curr_work.oam_addr = self.curr_work.oam_addr.wrapping_add(1);
-            self.curr_work.oam_odd = !self.curr_work.oam_odd;
+
+        if self.curr_work.oam.fix {
+            self.curr_work.oam.fix = false;
+            self.cycles += 1;
+            return;
+        }
+
+        // NOTE: Whether DMA put cycle is even or odd, is random at power
+        // As such, decided by a fair dice roll, it shall be even
+        if self.cycles % 2 == 0 {
+            ppu.write_oam(self.curr_work.oam.val);
+            self.curr_work.oam.addr = self.curr_work.oam.addr.wrapping_add(1);
         } else {
-            self.curr_work.oam_val = self.at_nc(self.curr_work.oam_addr);
-            self.curr_work.oam_odd = !self.curr_work.oam_odd;
+            self.curr_work.oam.val = self.at_nc(self.curr_work.oam.addr);
         }
+        self.cycles += 1;
+    }
+
+    pub fn reload_dmc_reader(&mut self) {
+        if !self.curr_work.dmc.dma {
+            self.curr_work.dmc.dma = true;
+            self.curr_work.dmc.halt = true;
+            self.curr_work.dmc.time = if self.cycles % 2 == 0 { 3 } else { 4 };
+        }
+    }
+
+    // TODO: There are potentially bugs to add
+    fn do_dmc_dma(&mut self, apu: &mut apu::State) {
+        if self.curr_work.oam.fix {
+            self.curr_work.oam.fix = false;
+            self.cycles += 1;
+        }
+
+        apu.dmc.sample = Some(self.at(apu.dmc.reader_addr));
+
+        apu.dmc.reader_addr = if apu.dmc.reader_addr == 0xFFFF {
+            0x8000
+        } else {
+            apu.dmc.reader_addr + 1
+        };
+
+        apu.dmc.bytes_remain -= 1;
+        if apu.dmc.bytes_remain == 0 {
+            if apu.dmc.lop {
+                apu.dmc.reader_addr = apu.dmc.loaded_addr;
+                apu.dmc.bytes_remain = apu.dmc.loaded_bytes_remain;
+            } else if apu.dmc.int_enable {
+                apu.dmc.int = true;
+            }
+        }
+
+        self.curr_work.dmc.dma = false;
         self.cycles += 1;
     }
 
@@ -454,7 +511,7 @@ impl State {
             0x00 | 0x04 => {
                 pulse.duty = (val & 0xC0) >> 6;
 
-                pulse.length_cnt.halt = val & 0x20 != 0;
+                pulse.length_cnt.halt = val & 0x20 == 0;
                 pulse.env.lop = val & 0x20 != 0;
 
                 pulse.env.constn = val & 0x10 != 0;
@@ -479,7 +536,7 @@ impl State {
             }
             0x08 => {
                 apu.tri.control = val & 0x80 != 0;
-                apu.tri.length_cnt.halt = val & 0x80 != 0;
+                apu.tri.length_cnt.halt = val & 0x80 == 0;
                 apu.tri.linear_rld_cnt = val & 0x7F;
             }
             0x0A => {
@@ -491,7 +548,7 @@ impl State {
                 apu.tri.linear_rld = true;
             }
             0x0C => {
-                apu.noise.length_cnt.halt = val & 0x20 != 0;
+                apu.noise.length_cnt.halt = val & 0x20 == 0;
                 apu.noise.env.lop = val & 0x20 != 0;
 
                 apu.noise.env.constn = val & 0x10 != 0;
@@ -507,11 +564,42 @@ impl State {
                 apu.noise.div.period = NOISE_PERIOD_LUT[(val & 0x0F) as usize];
             }
             0x0F => {}
+            0x10 => {
+                const DMC_RATE_LUT: [u16; 16] = [
+                    214, 190, 170, 160, 143, 127, 113, 107, 95, 80, 71, 64, 53, 42, 36, 27,
+                ];
+                apu.dmc.int_enable = if val & 0x80 == 0 { false } else { apu.dmc.int };
+                apu.dmc.lop = val & 0x40 != 0;
+                apu.dmc.div.period = DMC_RATE_LUT[(val & 0x0F) as usize];
+            }
+            0x11 => {
+                apu.dmc.output = val & 0x7F;
+            }
+            0x12 => {
+                apu.dmc.loaded_addr = ((val as u16) << 6) | 0xC000;
+            }
+            0x13 => {
+                apu.dmc.loaded_bytes_remain = ((val as u16) << 4) | 0x1;
+            }
             0x14 => {
                 let addr = val;
-                self.curr_work.oam_dma = true;
-                self.curr_work.oam_addr = (addr as u16) << 8;
-                self.curr_work.oam_odd = false;
+                self.curr_work.oam.halt = true;
+                self.curr_work.oam.dma = true;
+                self.curr_work.oam.addr = (addr as u16) << 8;
+            }
+            0x15 => {
+                if val & 0x10 != 0 {
+                    self.curr_work.dmc.dma = true;
+                    self.curr_work.dmc.halt = true;
+                    self.curr_work.dmc.time = if self.cycles % 2 == 0 { 3 } else { 4 };
+                } else {
+                    apu.dmc.bytes_remain = 0;
+                }
+                apu.noise.length_cnt.halt = val & 0x08 == 0;
+                apu.tri.length_cnt.halt = val & 0x04 == 0;
+                apu.pulse1.length_cnt.halt = val & 0x02 == 0;
+                apu.pulse0.length_cnt.halt = val & 0x01 == 0;
+                apu.dmc.int = false;
             }
             0x16 => {
                 controllers.0.write_strobe(val);
@@ -519,9 +607,9 @@ impl State {
             }
             0x17 => {
                 apu.framecnt.mode = val & 0x80 != 0;
-                apu.framecnt.interrupt_inh = val & 0x40 != 0;
-                if apu.framecnt.interrupt_inh {
-                    self.irq = false;
+                apu.framecnt.int_inh = val & 0x40 != 0;
+                if apu.framecnt.int_inh {
+                    apu.framecnt.int = false;
                 }
             }
             _ => (),
@@ -536,6 +624,34 @@ impl State {
         let mut controllers = controllers.borrow_mut();
         let mut apu = apu.borrow_mut();
         match misc_n {
+            0x15 => {
+                let mut byte = 0;
+                if apu.dmc.int {
+                    byte |= 0x80;
+                }
+                if apu.framecnt.int {
+                    byte |= 0x40;
+                }
+                // 0x20 = 0
+                if apu.dmc.bytes_remain > 0 {
+                    byte |= 0x10;
+                }
+                if apu.noise.length_cnt.length_cnt > 0 {
+                    byte |= 0x08;
+                }
+                if apu.tri.length_cnt.length_cnt > 0 {
+                    byte |= 0x04;
+                }
+                if apu.pulse1.length_cnt.length_cnt > 0 {
+                    byte |= 0x02;
+                }
+                if apu.pulse0.length_cnt.length_cnt > 0 {
+                    byte |= 0x01;
+                }
+
+                apu.framecnt.int = false;
+                byte
+            }
             0x16 => controllers.0.read() | (0x40 << 3),
             0x17 => controllers.1.read() | (0x41 << 3),
             i => self.misc[i as usize],
@@ -786,9 +902,10 @@ impl State {
             }
             6 => {
                 self.pc = 0x00FE;
-                self.p.int_dis = true;
+                // Technically int_dis is here, but we want to finish this
             }
             7 => {
+                self.p.int_dis = true;
                 trace!("IRQ!");
                 self.pc |= 0xFF00;
                 self.pc = self.at16(self.pc);
@@ -843,7 +960,10 @@ impl State {
             0..3 => (),
             3 => self.s = self.s.wrapping_sub(1),
             4 => self.s = self.s.wrapping_sub(1),
-            5 => self.s = self.s.wrapping_sub(1),
+            5 => {
+                self.assign(0x4015, 0);
+                self.s = self.s.wrapping_sub(1)
+            }
             6 => {
                 self.pc = 0x00FC;
                 self.p.int_dis = true;
@@ -878,8 +998,13 @@ impl State {
                 if self.get_ctrl().gen_nmi && self.get_stt().vblank {
                     return self.int_nmi();
                 }
-                if !self.p.int_dis && self.irq {
-                    return self.int_irq();
+                if let Some(apu) = self.apu_st.clone() {
+                    if !self.p.int_dis && apu.borrow().dmc.int {
+                        return self.int_irq();
+                    }
+                    if !self.p.int_dis && apu.borrow().framecnt.int {
+                        return self.int_irq();
+                    }
                 }
                 self.curr_instr.cycle = 1;
                 let res = Err(self.at(self.pc));
@@ -2723,9 +2848,35 @@ impl State {
     }
 
     pub fn cycle(&mut self) -> Result<(), InstrErr> {
-        if self.curr_work.oam_dma {
+        // Should probably handle these in a separate pseudo-instructions
+        // But it works well for now
+        if self.curr_work.dmc.dma {
+            if self.curr_work.dmc.time != 0 {
+                self.curr_work.dmc.time -= 1;
+                self.cycles += 1;
+                return Ok(());
+            }
+            if self.curr_work.dmc.halt {
+                self.curr_work.dmc.fix = self.cycles % 2 == 1;
+                self.curr_work.dmc.halt = false;
+                self.cycles += 1;
+                return Ok(());
+            }
+            if let Some(apu) = self.apu_st.clone() {
+                self.do_dmc_dma(&mut apu.borrow_mut());
+                return Ok(());
+            }
+        }
+
+        if self.curr_work.oam.dma {
+            if self.curr_work.oam.halt {
+                self.curr_work.oam.fix = self.cycles % 2 == 1;
+                self.curr_work.oam.halt = false;
+                self.cycles += 1;
+                return Ok(());
+            }
             if let Some(ppu) = self.ppu_st.clone() {
-                self.do_dma(&mut ppu.borrow_mut());
+                self.do_oam_dma(&mut ppu.borrow_mut());
                 return Ok(());
             }
         }

@@ -549,7 +549,7 @@ impl State {
             }
             _ => {
                 error!("Bad Read at {:x}", self.v);
-                unimplemented!()
+                0
             }
         };
 

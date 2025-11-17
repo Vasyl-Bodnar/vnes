@@ -41,10 +41,12 @@ const WIDTH: usize = 256;
 const HEIGHT: usize = 240;
 const SCALE: usize = 3;
 
-const DELTA: f32 = 1. / 60.0988;
+const FPS: f32 = 60.0988;
+const DELTA: f32 = 1. / FPS;
 // Currently a magicish number that produces the best result
 const PPU_CYCLES_PER_FRAME: usize = 89342;
-const CPU_CYCLES_PER_SEC: usize = 1789773;
+// Should probably calculate from DELTA or PPU_CYCLES_PER_FRAME
+const CPU_CYCLES_PER_SEC: usize = (PPU_CYCLES_PER_FRAME / 3) * FPS as usize;
 
 struct Screen {
     window: Rc<Window>,
