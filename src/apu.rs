@@ -25,6 +25,7 @@ pub struct FrameCounter {
     pub mode: bool,
     pub int_inh: bool,
     pub int: bool,
+    pub reset_time: u8,
 }
 
 #[derive(Default)]
@@ -530,14 +531,14 @@ impl State {
         pulse + tnd
     }
 
-    fn qt_clock(&mut self) {
+    pub fn qt_clock(&mut self) {
         self.pulse0.qt_clock();
         self.pulse1.qt_clock();
         self.tri.qt_clock();
         self.noise.qt_clock();
     }
 
-    fn qh_clock(&mut self) {
+    pub fn qh_clock(&mut self) {
         self.pulse0.qh_clock();
         self.pulse1.qh_clock();
         self.tri.qh_clock();
@@ -549,6 +550,13 @@ impl State {
             // Triangle wave clocks on cpu time
             self.tri.clock();
             return;
+        }
+
+        if self.framecnt.reset_time != 0 {
+            self.framecnt.reset_time -= 1;
+            if self.framecnt.reset_time == 0 {
+                self.cycles = 0;
+            }
         }
 
         match self.cycles {

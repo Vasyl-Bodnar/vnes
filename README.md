@@ -1,5 +1,5 @@
 # vnes
-Personal NES emulator with cycle-accurate 6502, PPU, almost working APU
+Personal NES emulator with cycle-accurate 6502 CPU, PPU, getting-there APU
 and keyboard input support.
 
 Utilizes [softbuffer](https://github.com/rust-windowing/softbuffer) for graphics, 

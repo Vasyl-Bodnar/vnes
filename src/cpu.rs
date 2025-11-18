@@ -607,10 +607,14 @@ impl State {
             }
             0x17 => {
                 apu.framecnt.mode = val & 0x80 != 0;
+                if apu.framecnt.mode {
+                    apu.qh_clock();
+                }
                 apu.framecnt.int_inh = val & 0x40 != 0;
                 if apu.framecnt.int_inh {
                     apu.framecnt.int = false;
                 }
+                apu.framecnt.reset_time = if self.cycles % 6 == 0 { 6 } else { 8 };
             }
             _ => (),
         }

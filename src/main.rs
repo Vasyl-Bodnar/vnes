@@ -201,6 +201,7 @@ impl NesData {
         self.cpu.mapper_st = Some(self.mapper.clone());
     }
 
+    // TODO: making extra assumptions here
     pub fn setup_sound(&mut self) {
         let host = default_host();
         let dev = host.default_output_device().expect("No device found");
@@ -211,7 +212,7 @@ impl NesData {
             .next()
             .expect("No configs")
             .with_max_sample_rate();
-        // TODO: making an extra assumption here
+
         let (prod, mut cons) = SharedRb::<Heap<f32>>::new(4096).split();
 
         self.apu.borrow_mut().buf = prod;
@@ -225,8 +226,9 @@ impl NesData {
                 &supported.config(),
                 move |data: &mut [f32], _: &OutputCallbackInfo| {
                     for sample in data.chunks_exact_mut(2) {
-                        sample[0] = cons.try_pop().unwrap_or(0.).clamp(-1., 1.);
-                        sample[1] = cons.try_pop().unwrap_or(0.).clamp(-1., 1.);
+                        let val = cons.try_pop().unwrap_or(0.).clamp(-1., 1.);
+                        sample[0] = val;
+                        sample[1] = val;
                     }
                 },
                 |err| error!("{:?}", err),
