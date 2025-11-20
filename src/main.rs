@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    env::args,
     fs::File,
     io::Read,
     num::NonZeroU32,
@@ -399,6 +400,12 @@ impl ApplicationHandler for Nes {
 }
 
 fn main() {
+    let args: Vec<String> = args().collect();
+    let Some(path) = args.get(1) else {
+        println!("ERROR: Please provided an absolute or relative path to the rom");
+        return;
+    };
+
     Builder::from_default_env()
         .filter_level(log::LevelFilter::Error)
         .init();
@@ -406,7 +413,7 @@ fn main() {
     let mut app = Nes::default();
 
     let mut buf: Vec<u8> = vec![];
-    let mut file = File::open(Path::new("nes/alter.nes")).unwrap();
+    let mut file = File::open(Path::new(&path)).unwrap();
     file.read_to_end(&mut buf).unwrap();
 
     app.data.setup_sound();

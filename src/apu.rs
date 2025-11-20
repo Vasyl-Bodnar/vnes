@@ -113,8 +113,10 @@ impl Envelope {
             self.decay = 15;
         } else {
             if self.div.clock() {
-                if self.decay == 0 && self.lop {
-                    self.decay = 15;
+                if self.decay == 0 {
+                    if self.lop {
+                        self.decay = 15;
+                    }
                 } else {
                     self.decay -= 1;
                 }
@@ -192,9 +194,9 @@ pub struct Pulse {
 impl Channel for Pulse {
     fn out(&self) -> u8 {
         if self.timer.time() < 8
-            || ((DUTY_SEQ[self.duty as usize] & (1 << self.seq)) != 0)
+            || ((DUTY_SEQ[self.duty as usize] & (1 << self.seq)) == 0)
             || self.length_cnt.done()
-        //|| self.sweep_mute
+            || self.sweep_mute
         {
             0
         } else {
@@ -249,9 +251,9 @@ impl Channel for Triangle {
             0
         } else {
             if self.seq >= 16 {
-                16 - (self.seq % 16)
+                self.seq % 16
             } else {
-                self.seq
+                16 - self.seq
             }
         }
     }
@@ -268,19 +270,20 @@ impl Channel for Triangle {
 impl Triangle {
     fn clock(&mut self) {
         let time = self.timer.inc_time();
-        if time == 0 && self.linear_cnt > 0 && !self.length_cnt.done() {
+        if time == 0 && !self.length_cnt.done() {
             self.seq = (self.seq + 1) % 32;
         }
     }
 
     fn dec_linear_cnt(&mut self) {
-        if !self.control {
-            self.linear_rld = false;
-        }
         if self.linear_rld {
             self.linear_cnt = self.linear_rld_cnt;
-        } else {
+        } else if self.linear_cnt > 0 {
             self.linear_cnt -= 1;
+        }
+
+        if !self.control {
+            self.linear_rld = false;
         }
     }
 }
@@ -288,7 +291,6 @@ impl Triangle {
 pub struct Noise {
     pub env: Envelope,
     pub length_cnt: LengthCounter,
-    // This should be a timer, but for our purposes, they might as well be identical
     pub div: Divider,
     pub mode: bool,
     pub shift: u16,
@@ -314,6 +316,7 @@ impl Channel for Noise {
             self.env.out()
         }
     }
+
     fn qt_clock(&mut self) {
         self.env.clock();
     }
@@ -328,13 +331,13 @@ impl Noise {
         if self.div.clock() {
             let feedback = (self.shift & 0x1)
                 ^ if self.mode {
-                    (self.shift & 0x40) >> 6
+                    (self.shift >> 5) & 0x1
                 } else {
-                    (self.shift & 0x2) >> 1
+                    (self.shift >> 1) & 0x1
                 };
             self.shift >>= 1;
             self.shift &= 0x3FFF;
-            self.shift |= feedback << 14;
+            self.shift |= feedback << 13;
         }
     }
 }
@@ -519,9 +522,9 @@ impl State {
             95.88 / ((8128. / pulse) + 100.)
         };
 
-        let tnd = (self.tri.out() as f32) / 8227.
-            + (self.noise.out() as f32) / 12241.
-            + (self.dmc.out() as f32) / 22638.;
+        let tnd = ((self.tri.out() as f32) / 8227.)
+            + ((self.noise.out() as f32) / 12241.)
+            + ((self.dmc.out() as f32) / 22638.);
         let tnd = if tnd == 0. {
             0.
         } else {
@@ -595,11 +598,12 @@ impl State {
 
         self.pulse0.clock();
         self.pulse1.clock();
+        self.tri.clock();
         self.noise.clock();
         self.dmc.clock(cpu);
         self.cycles = self.cycles.wrapping_add(1);
 
-        let decim = (crate::CPU_CYCLES_PER_SEC as usize) / self.sample_rate as usize;
+        let decim = ((crate::CPU_CYCLES_PER_SEC as usize) / 2) / self.sample_rate as usize;
         if self.cycles as usize % decim == 0 {
             self.avg = (self.avg + self.mix()) / decim as f32;
             let _ = self.buf.try_push(self.filter.filter(self.avg));
