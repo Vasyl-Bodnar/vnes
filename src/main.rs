@@ -47,7 +47,8 @@ const DELTA: f32 = 1. / FPS;
 // Currently a magicish number that produces the best result
 const PPU_CYCLES_PER_FRAME: usize = 89342;
 // Should probably calculate from DELTA or PPU_CYCLES_PER_FRAME
-const CPU_CYCLES_PER_SEC: usize = (PPU_CYCLES_PER_FRAME / 3) * FPS as usize;
+const CPU_CYCLES_PER_SEC: usize = (((PPU_CYCLES_PER_FRAME as f32) / 3.) * FPS) as usize;
+const APU_CYCLES_PER_SEC: usize = (CPU_CYCLES_PER_SEC / 2) as usize;
 
 struct Screen {
     window: Rc<Window>,
@@ -242,10 +243,7 @@ impl NesData {
         for i in 0..PPU_CYCLES_PER_FRAME {
             if i % 3 == 0 {
                 self.cpu.cycle().unwrap();
-                self.apu.borrow_mut().cycle(&mut self.cpu, true);
-            }
-            if i % 6 == 0 {
-                self.apu.borrow_mut().cycle(&mut self.cpu, false);
+                self.apu.borrow_mut().cycle(&mut self.cpu, i % 2 == 0);
             }
             self.ppu.borrow_mut().cycle(&mut self.cpu, buf);
         }

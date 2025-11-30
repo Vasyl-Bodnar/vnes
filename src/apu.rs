@@ -26,30 +26,6 @@ pub struct FrameCounter {
 }
 
 #[derive(Default, Debug)]
-pub struct Timer {
-    // 11 bits total
-    pub timer_lo: u8, // 8 bits
-    pub timer_hi: u8, // 3 bits
-}
-
-impl Timer {
-    fn inc_time(&mut self) -> u16 {
-        let time = (self.time() + 1) % 0x7FF;
-        self.set_time(time);
-        time
-    }
-
-    fn time(&self) -> u16 {
-        (self.timer_lo as u16) | (((self.timer_hi & 0x7) as u16) << 8)
-    }
-
-    fn set_time(&mut self, timer: u16) {
-        self.timer_lo = (timer & 0xFF) as u8;
-        self.timer_hi = ((timer & 0x700) >> 8) as u8;
-    }
-}
-
-#[derive(Default, Debug)]
 pub struct LengthCounter {
     pub halt: bool,
     pub length_cnt: u8,
@@ -90,6 +66,30 @@ impl Divider {
         }
         self.counter -= 1;
         false
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct Timer {
+    // 11 bits total
+    pub timer_lo: u8, // 8 bits
+    pub timer_hi: u8, // 3 bits
+    pub timer: u16,
+}
+
+impl Timer {
+    fn dec_time(&mut self) -> u16 {
+        let time = self.timer - 1;
+        if time == 0 {
+            self.timer = self.time_value();
+        } else {
+            self.timer = time;
+        }
+        time
+    }
+
+    fn time_value(&self) -> u16 {
+        (self.timer_lo as u16) | (((self.timer_hi & 0x7) as u16) << 8)
     }
 }
 
@@ -193,7 +193,7 @@ pub struct Pulse {
 impl Channel for Pulse {
     fn out(&self) -> u8 {
         if !self.on
-            || self.timer.time() < 8
+            || self.timer.timer < 8
             || ((DUTY_SEQ[self.duty as usize] & (1 << self.seq)) == 0)
             || self.length_cnt.done()
             || self.sweep_mute
@@ -211,12 +211,12 @@ impl Channel for Pulse {
     fn hf_clock(&mut self) {
         self.length_cnt.clock();
 
-        match self.sweep.clock(self.timer.time()) {
+        match self.sweep.clock(self.timer.timer) {
             None => self.sweep_mute = false,
             Some(0) => self.sweep_mute = true,
             Some(target) => {
                 self.sweep_mute = false;
-                self.timer.set_time(target)
+                self.timer.timer = target;
             }
         }
     }
@@ -224,7 +224,7 @@ impl Channel for Pulse {
 
 impl Pulse {
     fn clock(&mut self) {
-        let time = self.timer.inc_time();
+        let time = self.timer.dec_time();
         if time == 0 {
             self.seq = (self.seq + 1) % 8;
         }
@@ -248,7 +248,7 @@ impl Channel for Triangle {
     fn out(&self) -> u8 {
         // TODO: Timer can be set to frequencies too high to even hear,
         // we do not consider them while our accuracy overall is not high enough to bother
-        if !self.on || self.timer.time() < 2 || self.length_cnt.done() || self.linear_cnt == 0 {
+        if !self.on || self.timer.timer < 2 || self.length_cnt.done() || self.linear_cnt == 0 {
             0
         } else {
             if self.seq >= 16 {
@@ -270,7 +270,7 @@ impl Channel for Triangle {
 
 impl Triangle {
     fn clock(&mut self) {
-        let time = self.timer.inc_time();
+        let time = self.timer.dec_time();
         if time == 0 && !self.length_cnt.done() {
             self.seq = (self.seq + 1) % 32;
         }
@@ -581,6 +581,17 @@ impl State {
             return;
         }
 
+        let decim = (crate::APU_CYCLES_PER_SEC as usize) / self.sample_rate as usize;
+        if self.cycles as usize % (decim + 1) == 0 {
+            self.avg += self.mix();
+            self.avg /= (decim + 1) as f32;
+            let _ = self
+                .buf
+                .try_push(self.filter.filter(self.avg, self.sample_rate as f32));
+        } else {
+            self.avg += self.mix();
+        }
+
         if self.framecnt.reset_time != 0 {
             self.framecnt.reset_time -= 1;
             if self.framecnt.reset_time == 0 {
@@ -628,17 +639,5 @@ impl State {
         self.noise.clock();
         self.dmc.clock(cpu);
         self.cycles = self.cycles.wrapping_add(1);
-
-        let decim = (crate::CPU_CYCLES_PER_SEC as usize) / self.sample_rate as usize;
-        // Trying simple decimation
-        if self.cycles as usize % decim == 0 {
-            self.avg = self.mix();
-            let _ = self
-                .buf
-                .try_push(self.filter.filter(self.avg, self.sample_rate as f32));
-            self.avg = 0.;
-        } else {
-            self.avg += self.mix();
-        }
     }
 }

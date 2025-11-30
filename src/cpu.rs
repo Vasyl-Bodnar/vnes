@@ -504,7 +504,7 @@ impl State {
 
         let val = self.at_nc(0x4000 + misc_n as u16);
 
-        let pulse = if misc_n == 0x00 {
+        let pulse = if misc_n < 0x04 {
             &mut apu.pulse0
         } else {
             &mut apu.pulse1
@@ -533,7 +533,7 @@ impl State {
                 pulse.timer.timer_lo = val;
             }
             0x03 | 0x07 => {
-                pulse.env.start = true;
+                pulse.seq = 0;
                 pulse.length_cnt.length_cnt = (val & 0xF8) >> 3;
                 pulse.timer.timer_hi = val & 0x07;
                 pulse.reset = true;
