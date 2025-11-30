@@ -1,6 +1,5 @@
 use std::{cell::RefCell, fmt::Debug, ops::Range, rc::Rc};
 
-use log::error;
 use log::trace;
 
 use crate::apu;
@@ -534,6 +533,7 @@ impl State {
                 pulse.timer.timer_lo = val;
             }
             0x03 | 0x07 => {
+                pulse.env.start = true;
                 pulse.length_cnt.length_cnt = (val & 0xF8) >> 3;
                 pulse.timer.timer_hi = val & 0x07;
                 pulse.reset = true;
@@ -606,10 +606,10 @@ impl State {
                 apu.tri.length_cnt.halt = val & 0x04 == 0;
                 apu.pulse1.length_cnt.halt = val & 0x02 == 0;
                 apu.pulse0.length_cnt.halt = val & 0x01 == 0;
-                apu.noise.on = val & 0x08 == 0;
-                apu.tri.on = val & 0x04 == 0;
-                apu.pulse1.on = val & 0x02 == 0;
-                apu.pulse0.on = val & 0x01 == 0;
+                apu.noise.on = val & 0x08 != 0;
+                apu.tri.on = val & 0x04 != 0;
+                apu.pulse1.on = val & 0x02 != 0;
+                apu.pulse0.on = val & 0x01 != 0;
                 apu.dmc.int = false;
             }
             0x16 => {

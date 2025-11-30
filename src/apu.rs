@@ -79,7 +79,7 @@ impl LengthCounter {
 #[derive(Default, Debug)]
 pub struct Divider {
     pub period: u16,
-    counter: u16,
+    pub counter: u16,
 }
 
 impl Divider {
@@ -108,6 +108,7 @@ impl Envelope {
         if self.start {
             self.start = false;
             self.decay = 15;
+            self.div.counter = self.div.period;
         } else {
             if self.div.clock() {
                 if self.decay == 0 {
@@ -629,8 +630,9 @@ impl State {
         self.cycles = self.cycles.wrapping_add(1);
 
         let decim = (crate::CPU_CYCLES_PER_SEC as usize) / self.sample_rate as usize;
+        // Trying simple decimation
         if self.cycles as usize % decim == 0 {
-            self.avg = (self.avg + self.mix()) / decim as f32;
+            self.avg = self.mix();
             let _ = self
                 .buf
                 .try_push(self.filter.filter(self.avg, self.sample_rate as f32));
