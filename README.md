@@ -11,6 +11,7 @@ Currently supports mappers 0 and 2 only.
 
 ## Build
 You can build it with the usual `cargo build --release`. 
+For cross-platform builds use e.g. `cargo build --release --target x86_64-pc-windows-gnu`.
 
 Note that platforms other than Windows are untested. 
 However X11, Wayland, and Mac should be supported according to 

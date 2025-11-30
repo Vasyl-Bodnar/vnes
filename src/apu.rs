@@ -1,13 +1,10 @@
-use std::{f32::consts::PI, sync::Arc};
+use std::{f32::consts::PI, fmt::Debug, sync::Arc};
 
 use ringbuf::{storage::Heap, traits::Producer, wrap::caching::Caching, SharedRb};
 
 use crate::cpu;
 
 const DUTY_SEQ: [u8; 4] = [0b01000000, 0b01100000, 0b01111000, 0b10011111];
-const HPASS1: f32 = -2. * PI * 90. / 48000.;
-const HPASS2: f32 = -2. * PI * 440. / 48000.;
-const LPASS: f32 = -2. * PI * 14000. / 48000.;
 
 trait Channel {
     fn out(&self) -> u8;
@@ -20,7 +17,7 @@ trait Channel {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct FrameCounter {
     pub mode: bool,
     pub int_inh: bool,
@@ -28,7 +25,7 @@ pub struct FrameCounter {
     pub reset_time: u8,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Timer {
     // 11 bits total
     pub timer_lo: u8, // 8 bits
@@ -52,7 +49,7 @@ impl Timer {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct LengthCounter {
     pub halt: bool,
     pub length_cnt: u8,
@@ -79,7 +76,7 @@ impl LengthCounter {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Divider {
     pub period: u16,
     counter: u16,
@@ -96,7 +93,7 @@ impl Divider {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Envelope {
     pub div: Divider,
     pub decay: u8,
@@ -133,7 +130,7 @@ impl Envelope {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Sweep {
     pub div: Divider,
     pub enable: bool,
@@ -177,8 +174,9 @@ impl Sweep {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Pulse {
+    pub on: bool,
     pub env: Envelope,
     pub sweep: Sweep,
     pub timer: Timer,
@@ -193,7 +191,8 @@ pub struct Pulse {
 
 impl Channel for Pulse {
     fn out(&self) -> u8 {
-        if self.timer.time() < 8
+        if !self.on
+            || self.timer.time() < 8
             || ((DUTY_SEQ[self.duty as usize] & (1 << self.seq)) == 0)
             || self.length_cnt.done()
             || self.sweep_mute
@@ -231,8 +230,9 @@ impl Pulse {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Triangle {
+    pub on: bool,
     pub timer: Timer,
     pub length_cnt: LengthCounter,
     pub seq: u8,
@@ -247,7 +247,7 @@ impl Channel for Triangle {
     fn out(&self) -> u8 {
         // TODO: Timer can be set to frequencies too high to even hear,
         // we do not consider them while our accuracy overall is not high enough to bother
-        if self.timer.time() < 2 || self.length_cnt.done() || self.linear_cnt == 0 {
+        if !self.on || self.timer.time() < 2 || self.length_cnt.done() || self.linear_cnt == 0 {
             0
         } else {
             if self.seq >= 16 {
@@ -288,7 +288,9 @@ impl Triangle {
     }
 }
 
+#[derive(Debug)]
 pub struct Noise {
+    pub on: bool,
     pub env: Envelope,
     pub length_cnt: LengthCounter,
     pub div: Divider,
@@ -299,6 +301,7 @@ pub struct Noise {
 impl Default for Noise {
     fn default() -> Self {
         Self {
+            on: false,
             env: Default::default(),
             length_cnt: Default::default(),
             div: Default::default(),
@@ -310,7 +313,7 @@ impl Default for Noise {
 
 impl Channel for Noise {
     fn out(&self) -> u8 {
-        if self.length_cnt.done() || self.shift & 0x1 != 0 {
+        if !self.on || self.length_cnt.done() || self.shift & 0x1 != 0 {
             0
         } else {
             self.env.out()
@@ -342,7 +345,7 @@ impl Noise {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Dmc {
     pub int_enable: bool,
     pub lop: bool,
@@ -458,7 +461,7 @@ impl From<Status> for u8 {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Filter {
     pub hp1_prev_unfil: f32,
     pub hp1_prev_fil: f32,
@@ -468,13 +471,18 @@ struct Filter {
 }
 
 impl Filter {
-    fn filter(&mut self, cur: f32) -> f32 {
-        let s1 = f32::exp(HPASS1) * (self.hp1_prev_fil + cur - self.hp2_prev_unfil);
+    fn filter(&mut self, cur: f32, sample_rate: f32) -> f32 {
+        let hipass1: f32 = -2. * PI * 90. / sample_rate;
+        let hipass2: f32 = -2. * PI * 440. / sample_rate;
+        let lopass: f32 = -2. * PI * 14000. / sample_rate;
+
+        let s1 = f32::exp(hipass1) * (self.hp1_prev_fil + cur - self.hp2_prev_unfil);
         (self.hp1_prev_fil, self.hp1_prev_unfil) = (s1, cur);
-        let s2 = f32::exp(HPASS2) * (self.hp2_prev_fil + s1 - self.hp2_prev_unfil);
+        let s2 = f32::exp(hipass2) * (self.hp2_prev_fil + s1 - self.hp2_prev_unfil);
         (self.hp2_prev_fil, self.hp2_prev_unfil) = (s2, s1);
-        let s3 = f32::exp(LPASS) * s2 + ((1. - f32::exp(LPASS)) * self.lp_prev_fil);
+        let s3 = f32::exp(lopass) * s2 + ((1. - f32::exp(lopass)) * self.lp_prev_fil);
         self.lp_prev_fil = s3;
+
         s3.clamp(-1., 1.)
     }
 }
@@ -491,6 +499,23 @@ pub struct State {
     pub tri: Triangle,
     pub noise: Noise,
     pub dmc: Dmc,
+}
+
+impl Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("cycles", &self.cycles)
+            .field("avg", &self.avg)
+            .field("filter", &self.filter)
+            .field("sample_rate", &self.sample_rate)
+            .field("framecnt", &self.framecnt)
+            .field("pulse0", &self.pulse0)
+            .field("pulse1", &self.pulse1)
+            .field("tri", &self.tri)
+            .field("noise", &self.noise)
+            .field("dmc", &self.dmc)
+            .finish()
+    }
 }
 
 impl Default for State {
@@ -603,10 +628,12 @@ impl State {
         self.dmc.clock(cpu);
         self.cycles = self.cycles.wrapping_add(1);
 
-        let decim = ((crate::CPU_CYCLES_PER_SEC as usize) / 2) / self.sample_rate as usize;
+        let decim = (crate::CPU_CYCLES_PER_SEC as usize) / self.sample_rate as usize;
         if self.cycles as usize % decim == 0 {
             self.avg = (self.avg + self.mix()) / decim as f32;
-            let _ = self.buf.try_push(self.filter.filter(self.avg));
+            let _ = self
+                .buf
+                .try_push(self.filter.filter(self.avg, self.sample_rate as f32));
             self.avg = 0.;
         } else {
             self.avg += self.mix();

@@ -1,5 +1,6 @@
 use std::{cell::RefCell, fmt::Debug, ops::Range, rc::Rc};
 
+use log::error;
 use log::trace;
 
 use crate::apu;
@@ -214,6 +215,7 @@ struct CurrDmc {
     halt: bool,
     dma: bool,
     fix: bool,
+    load: bool,
 }
 
 #[derive(Default)]
@@ -380,12 +382,13 @@ impl State {
 
     // TODO: There are potentially bugs to add
     fn do_dmc_dma(&mut self, apu: &mut apu::State) {
-        if self.curr_work.oam.fix {
-            self.curr_work.oam.fix = false;
+        if self.curr_work.dmc.fix {
+            self.curr_work.dmc.fix = false;
             self.cycles += 1;
+            return;
         }
 
-        apu.dmc.sample = Some(self.at(apu.dmc.reader_addr));
+        apu.dmc.sample = Some(self.at_nc(apu.dmc.reader_addr));
 
         apu.dmc.reader_addr = if apu.dmc.reader_addr == 0xFFFF {
             0x8000
@@ -394,7 +397,7 @@ impl State {
         };
 
         apu.dmc.bytes_remain -= 1;
-        if apu.dmc.bytes_remain == 0 {
+        if apu.dmc.bytes_remain <= 0 {
             if apu.dmc.lop {
                 apu.dmc.reader_addr = apu.dmc.loaded_addr;
                 apu.dmc.bytes_remain = apu.dmc.loaded_bytes_remain;
@@ -404,6 +407,7 @@ impl State {
         }
 
         self.curr_work.dmc.dma = false;
+        self.curr_work.dmc.load = false;
         self.cycles += 1;
     }
 
@@ -589,9 +593,12 @@ impl State {
             }
             0x15 => {
                 if val & 0x10 != 0 {
-                    self.curr_work.dmc.dma = true;
-                    self.curr_work.dmc.halt = true;
-                    self.curr_work.dmc.time = if self.cycles % 2 == 0 { 3 } else { 4 };
+                    if apu.dmc.bytes_remain == 0 {
+                        self.curr_work.dmc.dma = true;
+                        self.curr_work.dmc.halt = true;
+                        self.curr_work.dmc.time = if self.cycles % 2 == 0 { 4 } else { 3 };
+                        self.curr_work.dmc.load = true;
+                    }
                 } else {
                     apu.dmc.bytes_remain = 0;
                 }
@@ -599,6 +606,10 @@ impl State {
                 apu.tri.length_cnt.halt = val & 0x04 == 0;
                 apu.pulse1.length_cnt.halt = val & 0x02 == 0;
                 apu.pulse0.length_cnt.halt = val & 0x01 == 0;
+                apu.noise.on = val & 0x08 == 0;
+                apu.tri.on = val & 0x04 == 0;
+                apu.pulse1.on = val & 0x02 == 0;
+                apu.pulse0.on = val & 0x01 == 0;
                 apu.dmc.int = false;
             }
             0x16 => {
@@ -2855,20 +2866,21 @@ impl State {
         // Should probably handle these in a separate pseudo-instructions
         // But it works well for now
         if self.curr_work.dmc.dma {
-            if self.curr_work.dmc.time != 0 {
-                self.curr_work.dmc.time -= 1;
-                self.cycles += 1;
-                return Ok(());
-            }
-            if self.curr_work.dmc.halt {
-                self.curr_work.dmc.fix = self.cycles % 2 == 1;
-                self.curr_work.dmc.halt = false;
-                self.cycles += 1;
-                return Ok(());
-            }
             if let Some(apu) = self.apu_st.clone() {
-                self.do_dmc_dma(&mut apu.borrow_mut());
-                return Ok(());
+                let mut apu = apu.borrow_mut();
+                if !self.curr_work.dmc.load || apu.dmc.bits_remain == 8 {
+                    if self.curr_work.dmc.time > 0 {
+                        self.curr_work.dmc.time -= 1;
+                    } else if self.curr_work.dmc.halt {
+                        self.curr_work.dmc.fix = self.cycles % 2 == 1;
+                        self.curr_work.dmc.halt = false;
+                        self.cycles += 1;
+                        return Ok(());
+                    } else {
+                        self.do_dmc_dma(&mut apu);
+                        return Ok(());
+                    }
+                }
             }
         }
 
